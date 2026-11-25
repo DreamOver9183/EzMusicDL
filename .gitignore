@@ -165,3 +165,6 @@ cache/
 bin_dev/
 ffmpeg_cache/
 deno_cache/
+
+# Downloaded binaries (yt-dlp, ffmpeg, deno) - too large for GitHub
+bin/

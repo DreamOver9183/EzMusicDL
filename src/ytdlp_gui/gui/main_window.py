@@ -1,602 +1,327 @@
 # -*- coding: utf-8 -*-
 """
-Main GUI window
-Author: vokrob
-Date: 18.07.2025
+Main GUI window - Native Windows 11 Fluent Utility for Pure MP3 Music Downloading.
 """
 
-import customtkinter as ctk
 from tkinter import messagebox
-import threading
-import tempfile
-from pathlib import Path
-import sys
+from typing import Optional
 
+import customtkinter as ctk
+
+from ytdlp_gui.core import binary_manager
 from ytdlp_gui.core.download_manager import DownloadManager
 from ytdlp_gui.core.settings_manager import SettingsManager
-from ytdlp_gui.core.update_checker import UpdateChecker
-from ytdlp_gui.gui.components.progress_display import ProgressDisplayFrame
-from ytdlp_gui.gui.components.download_queue import DownloadQueueFrame
-from ytdlp_gui.gui.components.simple_url_input import SimpleURLInputFrame
-from ytdlp_gui.gui.components.video_preview import VideoPreviewFrame
-from ytdlp_gui.gui.components.download_options import DownloadOptionsFrame
-from ytdlp_gui.utils.notifications import init_notifications, get_error_handler
-from ytdlp_gui.utils.logger import init_logging, get_logger, flush_logs
+from ytdlp_gui.gui.components.help_dialog import HelpDialog
+from ytdlp_gui.gui.components.music_search_view import MusicSearchView
+from ytdlp_gui.gui.components.my_music_view import MyMusicView
+from ytdlp_gui.gui.icons import get_icon
+from ytdlp_gui.gui.theme import COLORS, RADIUS, apply_windows_titlebar, font
+from ytdlp_gui.utils.logger import flush_logs, get_logger, init_logging
+from ytdlp_gui.utils.notifications import init_notifications
+from ytdlp_gui.utils.paths import get_resource_path
 
-ctk.set_appearance_mode("dark")
-theme_path = Path(__file__).parent.parent / "assets" / "themes" / "youtube_dark.json"
-ctk.set_default_color_theme(str(theme_path))
 
 class YTDLPGUIApp:
-    """Main app class"""
+    """Main pure-MP3 downloader window."""
 
-    def __init__(self):
+    def __init__(self, bootstrap_report: Optional[binary_manager.BootstrapReport] = None):
         init_logging()
         self.logger = get_logger(__name__)
-        self.logger.debug("[STARTUP] building SettingsManager")
-        flush_logs()
+        self.bootstrap_report = bootstrap_report
 
         self.settings_manager = SettingsManager()
-        self.logger.debug("[STARTUP] building DownloadManager")
-        flush_logs()
+        theme_mode = self.settings_manager.get("theme_mode", "light")
+        if theme_mode not in ("light", "dark"):
+            theme_mode = "light"
+        ctk.set_appearance_mode(theme_mode)
+
         self.download_manager = DownloadManager(self.settings_manager)
-        self.logger.debug("[STARTUP] DownloadManager ready")
-        flush_logs()
 
-        self.notification_manager = None
-        self.error_handler = None
-
-        self.startup_failed_ids = set()
-
-        self.update_checker = UpdateChecker(settings_manager=self.settings_manager)
-        self._update_info = None
-
-        # UI state
-        self.current_url = ""
-        self.preview_container = None
-
-        # Main window
-        self.logger.debug("[STARTUP] creating CTk window")
-        flush_logs()
         self.root = ctk.CTk()
-        self.logger.debug("[STARTUP] CTk window created")
-        flush_logs()
-        self.root.title("yt-dlp GUI")
-        self.root.geometry("1200x750")
-        self.root.minsize(1000, 650)
+        self.root.title("音樂下載工具")
+        self.root.geometry("1040x740")
+        self.root.minsize(880, 620)
+        self.root.configure(fg_color=COLORS["bg_canvas"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        self.logger.debug("[STARTUP] setting up UI")
-        flush_logs()
-        self.setup_ui()
-        self.logger.debug("[STARTUP] UI ready")
-        flush_logs()
-        self.setup_bindings()
-
-        # Override CTk default icon (after window is fully initialized)
-        self.root.after(500, self._set_window_icon)
+        self._setup_ui(theme_mode)
+        self.root.bind("<FocusIn>", self._on_window_focus)
+        self.root.after(50, lambda: apply_windows_titlebar(self.root, theme_mode))
+        self.root.after(200, self._set_window_icon)
 
         self.notification_manager = init_notifications(self.root)
-        self.error_handler = get_error_handler()
-
-        notifications_enabled = self.settings_manager.get('notification_enabled', True)
-        self.notification_manager.enable_notifications(notifications_enabled)
-
-        self._mark_existing_failed_downloads()
-        self._check_updates()
-
-    def _check_updates(self):
-        """Check for updates in background thread, then schedule next check in 6 hours"""
-        def _check():
-            try:
-                info = self.update_checker.check()
-                if info and info.get("available"):
-                    self._update_info = info
-                    self.logger.info(
-                        f"Update available: v{info['latest_version']}"
-                    )
-                    self.root.after(
-                        0,
-                        lambda: self._show_update_button()
-                    )
-            except Exception as e:
-                self.logger.warning(f"Update check failed: {e}")
-
-        threading.Thread(target=_check, daemon=True).start()
-        self.root.after(21600000, self._check_updates)
-
-    def _on_update_download(self):
-        """Handle update button click - download and apply update"""
-        if not self._update_info or not self._update_info.get("download_url"):
-            return
-
-        self.update_btn.configure(text="Downloading...", state="disabled")
-
-        def _do_update():
-            try:
-                dest_dir = tempfile.mkdtemp(prefix="ytdlp-gui-update-")
-
-                def progress_callback(p):
-                    self.root.after(
-                        0,
-                        lambda: self.update_btn.configure(
-                            text=f"Downloading... {int(p * 100)}%"
-                        )
-                    )
-
-                exe_path = self.update_checker.download_update(
-                    self._update_info["download_url"],
-                    dest_dir,
-                    progress_callback=progress_callback
-                )
-
-                if exe_path:
-                    self.root.after(0, lambda: self.update_btn.configure(text="Applying..."))
-                    self.update_checker.apply_update(exe_path)
-                    self.root.after(1500, self._exit_for_update)
-                else:
-                    self.root.after(
-                        0,
-                        lambda: self.update_btn.configure(
-                            text="Update Failed",
-                            fg_color="#F1F1F1",
-                            state="normal"
-                        )
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Update failed: {e}")
-                self.root.after(
-                    0,
-                    lambda: self.update_btn.configure(
-                        text="Update Failed",
-                        fg_color="#F1F1F1",
-                        state="normal"
-                    )
-                )
-
-        threading.Thread(target=_do_update, daemon=False).start()
-
-    def _show_update_button(self):
-        """Show update button in top-right corner"""
-        self.update_btn.configure(
-            text="Update",
-            fg_color="#F1F1F1",
-            state="normal"
+        self.notification_manager.enable_notifications(
+            self.settings_manager.get("notification_enabled", True)
         )
-        self.update_btn.grid(row=0, column=0, sticky="e", padx=(0, 15), pady=(8, 0))
 
-    def _exit_for_update(self):
-        """Exit the app so updater script can replace the exe"""
-        try:
-            self.download_manager.stop_all_downloads()
-            self.settings_manager.save_settings()
-        except Exception as e:
-            self.logger.error(f"Error during exit for update: {e}")
-        self.root.destroy()
-
-    def setup_ui(self):
-        """Setup UI"""
+    def _setup_ui(self, theme_mode: str):
         self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_rowconfigure(0, weight=0)
-        self.root.grid_rowconfigure(1, weight=1)
-        self.create_all_components()
-        self.show_url_input_state()
+        self.root.grid_rowconfigure(2, weight=1)
 
-    def create_all_components(self):
-        """Create UI components"""
-        self.update_btn = ctk.CTkButton(
+        # Top toolbar
+        nav_bar = ctk.CTkFrame(
             self.root,
-            text="",
-            width=90,
-            height=28,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#F1F1F1",
-            hover_color="#D0D0D0",
-            text_color="#0F0F0F",
-            command=self._on_update_download
+            fg_color=COLORS["bg_surface"],
+            corner_radius=0,
         )
+        nav_bar.grid(row=0, column=0, sticky="ew")
+        nav_bar.grid_columnconfigure(1, weight=1)
 
-        self.main_frame = ctk.CTkFrame(self.root)
-        self.main_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(0, weight=1)
+        tabs_left = ctk.CTkFrame(nav_bar, fg_color="transparent")
+        tabs_left.grid(row=0, column=0, padx=20, pady=12, sticky="w")
 
-        self.simple_url_input = SimpleURLInputFrame(
-            self.main_frame,
-            on_url_submit=self.on_url_submitted
+        self.tab_search_btn = ctk.CTkButton(
+            tabs_left,
+            text="搜尋下載",
+            image=get_icon("search", size=18, variant="accent"),
+            compound="left",
+            width=148,
+            height=44,
+            font=font(16, bold=True),
+            corner_radius=RADIUS["control"],
+            command=lambda: self._switch_tab("search"),
         )
+        self.tab_search_btn.pack(side="left", padx=(0, 8))
 
-        self.video_preview_frame = VideoPreviewFrame(
-            self.main_frame,
+        self.tab_library_btn = ctk.CTkButton(
+            tabs_left,
+            text="已下載音樂 (0)",
+            image=get_icon("music", size=18, variant="muted"),
+            compound="left",
+            width=184,
+            height=44,
+            font=font(16, bold=True),
+            corner_radius=RADIUS["control"],
+            command=lambda: self._switch_tab("library"),
+        )
+        self.tab_library_btn.pack(side="left")
+
+        right_controls = ctk.CTkFrame(nav_bar, fg_color="transparent")
+        right_controls.grid(row=0, column=2, padx=20, pady=12, sticky="e")
+
+        initial_theme_label = "深色" if theme_mode == "dark" else "淺色"
+        self.theme_var = ctk.StringVar(value=initial_theme_label)
+        self.theme_selector = ctk.CTkSegmentedButton(
+            right_controls,
+            values=["淺色", "深色"],
+            variable=self.theme_var,
+            height=40,
+            font=font(15, bold=True),
+            fg_color=COLORS["bg_canvas"],
+            selected_color=COLORS["accent_subtle"],
+            selected_hover_color=COLORS["accent_subtle"],
+            unselected_color=COLORS["bg_canvas"],
+            unselected_hover_color=COLORS["bg_control_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=RADIUS["control"],
+            command=self._on_theme_selected,
+        )
+        self.theme_selector.pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            right_controls,
+            text="設定與修復",
+            image=get_icon("settings", size=17, variant="default"),
+            compound="left",
+            width=136,
+            height=40,
+            font=font(15, bold=True),
+            fg_color=COLORS["bg_control"],
+            hover_color=COLORS["bg_control_hover"],
+            text_color=COLORS["text_primary"],
+            border_width=1,
+            border_color=COLORS["border_input"],
+            corner_radius=RADIUS["control"],
+            command=self._open_help_dialog,
+        ).pack(side="left")
+
+        # 1px top hairline divider
+        ctk.CTkFrame(
+            self.root,
+            height=1,
+            fg_color=COLORS["border_hairline"],
+            corner_radius=0,
+        ).grid(row=1, column=0, sticky="ew")
+
+        # Main workspace
+        self.content_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.content_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=16)
+        self.content_frame.grid_columnconfigure(0, weight=1)
+        self.content_frame.grid_rowconfigure(0, weight=1)
+
+        self.library_view = MyMusicView(
+            self.content_frame,
             settings_manager=self.settings_manager,
-            on_info_loaded=self._on_video_info_loaded
+            on_count_changed=self._update_library_badge,
         )
 
-        self.download_options_frame = DownloadOptionsFrame(
-            self.main_frame,
-            settings_manager=self.settings_manager,
-            on_download_click=self.on_options_download_click,
-            on_loading_changed=self._on_formats_loading_changed
-        )
-
-        self.fixed_buttons_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.fixed_buttons_frame.grid_columnconfigure(1, weight=1)
-
-        self.back_button = ctk.CTkButton(
-            self.fixed_buttons_frame,
-            text="Back",
-            width=120,
-            height=36,
-            font=ctk.CTkFont(size=13),
-            command=self.show_url_input
-        )
-        self.back_button.grid(row=0, column=0, sticky="w")
-
-        self.start_button = ctk.CTkButton(
-            self.fixed_buttons_frame,
-            text="Start",
-            width=120,
-            height=36,
-            font=ctk.CTkFont(size=13),
-            command=self.on_start_download_click
-        )
-        self.start_button.grid(row=0, column=2, sticky="e")
-
-        # 4. Progress Display Frame
-        self.progress_frame = ProgressDisplayFrame(self.main_frame)
-
-        # Set up clear errors callback
-        self.progress_frame.set_clear_errors_callback(self.clear_failed_downloads)
-
-        # Set up new download callback
-        self.progress_frame.set_new_download_callback(self.show_url_input)
-
-        # 5. Download Queue Frame
-        self.download_queue_frame = DownloadQueueFrame(
-            self.main_frame,
+        self.search_view = MusicSearchView(
+            self.content_frame,
             download_manager=self.download_manager,
-            on_back_click=self.go_back_from_downloads
+            settings_manager=self.settings_manager,
+            on_download_completed=self.library_view.refresh_list,
+            on_open_folder=self.library_view.open_downloads_folder,
         )
 
-        # Setup progress tracking
-        self.setup_progress_tracking()
+        # 1px bottom hairline divider
+        ctk.CTkFrame(
+            self.root,
+            height=1,
+            fg_color=COLORS["border_hairline"],
+            corner_radius=0,
+        ).grid(row=3, column=0, sticky="ew")
+
+        # Bottom status bar
+        status_bar = ctk.CTkFrame(
+            self.root,
+            fg_color=COLORS["bg_surface"],
+            corner_radius=0,
+            height=38,
+        )
+        status_bar.grid(row=4, column=0, sticky="ew")
+        status_bar.grid_columnconfigure(0, weight=1)
+
+        self.status_left_lbl = ctk.CTkLabel(
+            status_bar,
+            text=f" {self._build_engine_status_text()}",
+            image=get_icon("check", size=14, variant="accent"),
+            compound="left",
+            font=font(13),
+            text_color=COLORS["text_secondary"],
+            anchor="w",
+        )
+        self.status_left_lbl.grid(row=0, column=0, padx=20, pady=8, sticky="w")
+
+        self.status_right_lbl = ctk.CTkLabel(
+            status_bar,
+            text=f"存檔位置：{self.settings_manager.get_output_directory()}  （MP3）",
+            font=font(13),
+            text_color=COLORS["text_secondary"],
+            anchor="e",
+        )
+        self.status_right_lbl.grid(row=0, column=1, padx=20, pady=8, sticky="e")
+
+        self._switch_tab("search")
+
+    def _build_engine_status_text(self) -> str:
+        if self.bootstrap_report and self.bootstrap_report.ok:
+            return f"引擎驗證通過 · yt-dlp {self.bootstrap_report.ytdlp_version}"
+        st = binary_manager.get_engine_status()
+        return f"引擎就緒 · yt-dlp {st['ytdlp']}"
+
+    def _switch_tab(self, tab: str):
+        if tab == "search":
+            self.library_view.grid_remove()
+            self.search_view.grid(row=0, column=0, sticky="nsew")
+            self.tab_search_btn.configure(
+                fg_color=COLORS["accent_subtle"],
+                hover_color=COLORS["accent_subtle"],
+                text_color=COLORS["text_primary"],
+                border_width=1,
+                border_color=COLORS["accent_border"],
+                image=get_icon("search", size=18, variant="accent"),
+            )
+            self.tab_library_btn.configure(
+                fg_color="transparent",
+                hover_color=COLORS["bg_control_hover"],
+                text_color=COLORS["text_secondary"],
+                border_width=0,
+                image=get_icon("music", size=18, variant="muted"),
+            )
+        else:
+            self.search_view.grid_remove()
+            self.library_view.refresh_list()
+            self.library_view.grid(row=0, column=0, sticky="nsew")
+            self.tab_library_btn.configure(
+                fg_color=COLORS["accent_subtle"],
+                hover_color=COLORS["accent_subtle"],
+                text_color=COLORS["text_primary"],
+                border_width=1,
+                border_color=COLORS["accent_border"],
+                image=get_icon("music", size=18, variant="accent"),
+            )
+            self.tab_search_btn.configure(
+                fg_color="transparent",
+                hover_color=COLORS["bg_control_hover"],
+                text_color=COLORS["text_secondary"],
+                border_width=0,
+                image=get_icon("search", size=18, variant="muted"),
+            )
+
+    def _update_library_badge(self, count: int):
+        try:
+            self.tab_library_btn.configure(text=f"已下載音樂 ({count})")
+        except Exception:
+            pass
+
+    def _on_window_focus(self, event=None):
+        if event and event.widget is self.root:
+            self.search_view.check_clipboard()
+
+    def _on_theme_selected(self, value: str):
+        mode = "dark" if value == "深色" else "light"
+        self.settings_manager.set("theme_mode", mode)
+        self.settings_manager.save_settings()
+        ctk.set_appearance_mode(mode)
+        apply_windows_titlebar(self.root, mode)
+
+    def _open_help_dialog(self):
+        HelpDialog(
+            self.root,
+            settings_manager=self.settings_manager,
+            on_path_changed=self._on_save_path_changed,
+            on_engine_repaired=self._on_engine_repaired,
+        )
+
+    def _on_save_path_changed(self, new_path: str):
+        self.status_right_lbl.configure(text=f"存檔位置：{new_path}  （MP3）")
+        self.library_view.refresh_list()
+
+    def _on_engine_repaired(self, report: binary_manager.BootstrapReport):
+        self.bootstrap_report = report
+        self.status_left_lbl.configure(text=f" {self._build_engine_status_text()}")
 
     def _set_window_icon(self):
-        if getattr(sys, 'frozen', False):
-            ico_path = Path(sys._MEIPASS) / "assets" / "icon.ico"
-        else:
-            ico_path = Path(__file__).resolve().parent.parent.parent.parent / "assets" / "icon.ico"
+        ico_path = get_resource_path("assets/icon.ico")
         if not ico_path.exists():
-            self.logger.warning(f"Icon not found: {ico_path}")
             return
-
-        import ctypes
         try:
+            import ctypes
+
             hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
             if not hwnd:
-                self.logger.warning("No HWND for window")
                 return
-
-            LR_LOADFROMFILE = 0x10
-            IMAGE_ICON = 1
-            WM_SETICON = 0x0080
-            ICON_SMALL = 0
-            ICON_BIG = 1
-            GCLP_HICON = -14
-            GCLP_HICONSM = -34
-
             user32 = ctypes.windll.user32
-
-            # Class-level icons (survive any Tk withdraw/deiconify)
-            class_large = user32.LoadImageW(None, str(ico_path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
-            class_small = user32.LoadImageW(None, str(ico_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
-            if class_large:
-                user32.SetClassLongPtrW(hwnd, GCLP_HICON, class_large)
-            if class_small:
-                user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, class_small)
-
-            # Window-level icons (immediate visual update)
-            win_large = user32.LoadImageW(None, str(ico_path), IMAGE_ICON, 48, 48, LR_LOADFROMFILE)
-            win_small = user32.LoadImageW(None, str(ico_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            win_large = user32.LoadImageW(None, str(ico_path), 1, 48, 48, 0x10)
+            win_small = user32.LoadImageW(None, str(ico_path), 1, 16, 16, 0x10)
             if win_large:
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, win_large)
+                user32.SendMessageW(hwnd, 0x0080, 1, win_large)
             if win_small:
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, win_small)
-
-            self.root._iconbitmap_method_called = True
-        except Exception as e:
-            self.logger.warning(f"Failed to set icon: {e}")
-
-    def setup_bindings(self):
-        """Set up event bindings"""
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    # State Management Methods
-    def show_url_input_state(self):
-        """Show only the URL input (initial state)"""
-        self.logger.info("Switching to URL input state")
-        self.hide_all_frames()
-
-        # Configure main frame for single component
-        self.main_frame.grid_rowconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(1, weight=0)
-
-        self.simple_url_input.grid(row=0, column=0, sticky="nsew")
-
-        # Force update and refresh
-        self.main_frame.update_idletasks()
-        self.logger.info("URL input state shown")
-
-    def show_preview_state(self, url: str):
-        """Show video preview with download options"""
-        self.logger.info(f"Switching to preview state for URL: {url}")
-        self.current_url = url
-        self.hide_all_frames()
-
-        # Simple, clean layout - three rows with proper spacing
-        self.main_frame.grid_rowconfigure(0, weight=1)  # Video preview - takes most space
-        self.main_frame.grid_rowconfigure(1, weight=0)  # Download options - compact
-        self.main_frame.grid_rowconfigure(2, weight=0)  # Buttons - fixed at bottom
-        self.main_frame.grid_columnconfigure(0, weight=1)
-
-        # Show video preview frame - clean and spacious
-        self.video_preview_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=(20, 10))
-
-        # Show download options frame - centered and compact
-        self.download_options_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=10)
-
-        # Show buttons frame - clean bottom placement
-        self.fixed_buttons_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(10, 20))
-
-        # Start stays disabled until the quality list is ready
-        self.start_button.configure(state="disabled")
-
-        # Force update and refresh
-        self.main_frame.update_idletasks()
-
-        # Load video info (formats will load automatically after via callback)
-        self.video_preview_frame.load_video_info(url)
-
-        self.logger.info("Preview state setup complete")
-
-    def show_download_state(self):
-        """Show download queue only"""
-        self.logger.info("Switching to download state")
-        self.hide_all_frames()
-
-        # Configure main frame for single component: download queue only
-        self.main_frame.grid_rowconfigure(0, weight=1)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-
-        # Show only download queue (no Current Download)
-        self.download_queue_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
-
-        # Force update
-        self.main_frame.update_idletasks()
-        self.logger.info("Download state shown")
-
-    def hide_all_frames(self):
-        """Hide all main frames"""
-        self.logger.info("Hiding all frames")
-        self.simple_url_input.grid_remove()
-        self.video_preview_frame.grid_remove()
-        self.download_options_frame.grid_remove()
-        self.progress_frame.grid_remove()
-        self.download_queue_frame.grid_remove()
-        self.fixed_buttons_frame.grid_remove()
-
-        # Remove preview container if it exists
-        if hasattr(self, 'preview_container') and self.preview_container:
-            self.preview_container.destroy()
-            self.preview_container = None
-
-        # Also remove any other containers
-        for widget in self.main_frame.winfo_children():
-            if isinstance(widget, ctk.CTkFrame) and widget not in [
-                self.simple_url_input, self.video_preview_frame,
-                self.download_options_frame, self.progress_frame, self.download_queue_frame,
-                self.fixed_buttons_frame
-            ]:
-                widget.destroy()
-        self.logger.info("All frames hidden")
-
-    # Event Handlers for New UI
-    def on_url_submitted(self, url: str):
-        """Handle URL submission from simple input"""
-        self.logger.info(f"URL submitted: {url}")
-        try:
-            self.show_preview_state(url)
-        except Exception as e:
-            self.logger.error(f"Failed to show preview state: {e}")
-            import traceback
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _on_video_info_loaded(self, url: str):
-        """Handle video info loaded - load formats sequentially"""
-        self.logger.info(f"Video info loaded, now loading formats for: {url}")
-        self.download_options_frame.load_video_qualities(url)
-
-    def _on_formats_loading_changed(self, loading: bool):
-        """Enable Start only when the quality list is ready."""
-        if hasattr(self, 'start_button'):
-            self.start_button.configure(state="disabled" if loading else "normal")
-
-    def on_options_download_click(self, format_info: dict, output_path: str):
-        """Handle download click from options"""
-        self.logger.info(f"Starting download with format: {format_info}")
-
-        # Get video title from preview component
-        video_info = self.video_preview_frame.get_video_info()
-        video_title = None
-        if video_info and video_info.get('title'):
-            video_title = video_info['title']
-            self.logger.info(f"Using title from preview: '{video_title}'")
-
-
-
-        self.show_download_state()
-
-        # Start the actual download
-        try:
-            download_id = self.download_manager.add_download(
-                self.current_url, format_info, output_path, video_title
-            )
-            self.logger.info(f"Download started with ID: {download_id}")
-
-            # Register real-time progress callback
-            self.download_manager.add_progress_callback(
-                download_id,
-                lambda: self.root.after(0, self.update_progress_display)
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to start download: {e}")
-            self.progress_frame.show_error(f"Failed to start download: {str(e)}")
-
-    def on_start_download_click(self):
-        """Handle start download click from fixed button"""
-        self.logger.info("Start button clicked")
-        # Get format info from download options and start download
-        self.download_options_frame.start_download()
-
-    def go_back_from_downloads(self):
-        """Go back from downloads page"""
-        if self.current_url:
-            # If we have a current URL, go back to preview
-            self.show_preview_state(self.current_url)
-        else:
-            # Otherwise go to URL input
-            self.show_url_input()
-
-    def show_url_input(self):
-        """Return to URL input state (called by back button)"""
-        self.logger.info("show_url_input called (back button)")
-        self.show_url_input_state()
-        self.simple_url_input.clear_url()
-
-    def _mark_existing_failed_downloads(self):
-        """Mark all existing failed downloads as 'old' to avoid showing them"""
-        try:
-            for item in self.download_manager.get_queue():
-                if item.status.value == 'failed':
-                    self.startup_failed_ids.add(item.id)
-
-            self.logger.info(f"Marked {len(self.startup_failed_ids)} existing failed downloads as old")
-        except Exception as e:
-            self.logger.error(f"Error marking existing failed downloads: {e}")
-
-    def setup_progress_tracking(self):
-        """Setup progress tracking for downloads"""
-        # Add callback for queue changes to track active downloads
-        self.download_manager.add_queue_callback(self.on_queue_change)
-
-        # Start periodic progress updates
-        self.update_progress_display()
-
-    def update_progress_display(self):
-        """Update progress display with current active download"""
-        try:
-            # Get current active download (prioritize downloading status)
-            active_download = None
-            pending_download = None
-
-            for item in self.download_manager.get_queue():
-                if item.status.value == 'downloading':
-                    active_download = item
-                    break
-                elif item.status.value == 'pending' and pending_download is None:
-                    pending_download = item
-
-            # Update progress display
-            if active_download:
-                self.progress_frame.update_progress(active_download)
-            elif pending_download:
-                # Show pending download with preparing state
-                self.progress_frame.show_preparing(pending_download.title or "Preparing download...")
-            else:
-                # Check if any downloads completed recently
-                completed_downloads = [
-                    item for item in self.download_manager.get_queue()
-                    if item.status.value == 'completed'
-                ]
-
-                # Check for failed downloads - but don't show them in UI anymore
-                # (Failed downloads are still tracked in the queue and can be cleared manually)
-
-                if completed_downloads:
-                    # Show the most recently completed download briefly
-                    latest_completed = max(completed_downloads, key=lambda x: x.completed_at or 0)
-                    if not hasattr(self, '_last_completed_id') or self._last_completed_id != latest_completed.id:
-                        self.progress_frame.show_success(f"Download completed: {latest_completed.title}")
-                        self._last_completed_id = latest_completed.id
-
-                        # If we're in download state, show completion but don't auto-return
-                        # User can manually click "New Download" button if they want to start over
-                        # Clear after 3 seconds
-                        self.root.after(3000, lambda: self.progress_frame.clear_progress())
-                    else:
-                        self.progress_frame.clear_progress()
-                else:
-                    self.progress_frame.clear_progress()
-
-        except Exception as e:
-            self.logger.error(f"Error updating progress display: {e}")
-
-    def on_queue_change(self):
-        """Handle download queue changes"""
-        # Queue change handling simplified
-        pass
-
-    def clear_failed_downloads(self):
-        """Clear all failed downloads from the queue"""
-        try:
-            cleared_count = self.download_manager.clear_failed_downloads()
-            if cleared_count > 0:
-                self.logger.info(f"Cleared {cleared_count} failed downloads")
-                # Clear the startup failed IDs as well
-                self.startup_failed_ids.clear()
-                # Show success notification
-                if self.notification_manager:
-                    self.notification_manager.show_success(
-                        "Errors Cleared",
-                        f"Cleared {cleared_count} failed download(s)"
-                    )
-        except Exception as e:
-            self.logger.error(f"Failed to clear failed downloads: {e}")
-            if self.error_handler:
-                self.error_handler.handle_unexpected_error(e, "clearing failed downloads")
+                user32.SendMessageW(hwnd, 0x0080, 0, win_small)
+        except Exception:
+            pass
 
     def on_closing(self):
-        """Handle app closing"""
         try:
-            active_downloads = len([
-                item for item in self.download_manager.get_queue()
-                if item.status.value == 'downloading'
-            ])
-
+            active_downloads = len(
+                [item for item in self.download_manager.get_queue() if item.status.value == "downloading"]
+            )
             if active_downloads > 0:
-                result = messagebox.askyesno(
-                    "Active Downloads",
-                    f"There are {active_downloads} active download(s).\n\n"
-                    "Do you want to stop them and exit?",
-                    parent=self.root
+                confirm = messagebox.askyesno(
+                    "仍有歌曲正在下載",
+                    f"目前還有 {active_downloads} 首歌曲正在下載中。\n確定要停止下載並關閉視窗嗎？",
+                    parent=self.root,
                 )
-                if not result:
+                if not confirm:
                     return
-
             self.download_manager.stop_all_downloads()
             self.settings_manager.save_settings()
             self.root.destroy()
-
         except Exception as e:
-            self.logger.error(f"Error during shutdown: {e}")
+            self.logger.error("關閉視窗時發生錯誤: %s", e)
             self.root.destroy()
 
-
-
     def run(self):
-        """Start the application"""
-        self.logger.debug("[STARTUP] entering mainloop")
         flush_logs()
-        self.logger.info("Starting GUI application")
+        self.logger.info("進入主畫面 mainloop")
         self.root.mainloop()

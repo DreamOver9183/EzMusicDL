@@ -1,142 +1,220 @@
 # -*- coding: utf-8 -*-
 """
-Main Entry Point
-Author: vokrob
-Date: 18.07.2025
+Package Entry Point & Native Win11 3-Stage Startup Environment Check Splash UI.
 """
 
-import sys
-import os
 import logging
+import os
+import sys
 import threading
-from pathlib import Path
+from typing import Optional
 
+from .core import binary_manager
 from .gui.main_window import YTDLPGUIApp
+from .gui.theme import apply_windows_titlebar
+from .utils.logger import flush_logs, get_log_manager
+from .utils.paths import get_logs_dir, get_resource_path
+
+FONT_FAMILY = "Microsoft JhengHei UI"
 
 
-def setup_logging():
-    """Setup logging"""
-    if os.name == 'nt':
-        base_dir = Path(os.environ.get('APPDATA', Path.home()))
-    elif 'darwin' in os.uname().sysname.lower():
-        base_dir = Path.home() / 'Library' / 'Application Support'
-    elif os.name == 'posix':
-        base_dir = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
-    else:
-        base_dir = Path.home()
-    log_dir = base_dir / "yt-dlp-gui" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+def run_startup_bootstrap_ui() -> Optional[binary_manager.BootstrapReport]:
+    """
+    Show a clean native Windows splash window running:
+    1. 檢查環境與引擎更新
+    2. 下載與更新元件
+    3. 二次檢查與驗證環境
+    """
+    import tkinter as tk
+    from tkinter import ttk
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_dir / "app.log"),
-            logging.StreamHandler()
-        ]
+    root = tk.Tk()
+    root.title("音樂下載工具 - 啟動檢查")
+    root.geometry("520x250")
+    root.resizable(False, False)
+    root.configure(bg="#F3F3F3")
+
+    root.update_idletasks()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"520x250+{(sw - 520) // 2}+{(sh - 250) // 2}")
+    apply_windows_titlebar(root, "light")
+
+    try:
+        ico_path = get_resource_path("assets/icon.ico")
+        if ico_path.exists():
+            root.iconbitmap(str(ico_path))
+    except Exception:
+        pass
+
+    card = tk.Frame(
+        root,
+        bg="#FFFFFF",
+        highlightbackground="#E2E2E2",
+        highlightthickness=1,
+    )
+    card.pack(fill="both", expand=True, padx=16, pady=16)
+
+    tk.Label(
+        card,
+        text="音樂下載工具",
+        fg="#1A1A1A",
+        bg="#FFFFFF",
+        font=(FONT_FAMILY, 16, "bold"),
+    ).pack(pady=(20, 6))
+
+    stage_lbl = tk.Label(
+        card,
+        text="步驟 1/3：檢查環境與引擎更新",
+        fg="#0F6B4A",
+        bg="#FFFFFF",
+        font=(FONT_FAMILY, 12, "bold"),
+    )
+    stage_lbl.pack(pady=(2, 4))
+
+    detail_lbl = tk.Label(
+        card,
+        text="正在自動確認下載與轉檔元件狀態，請稍候...",
+        fg="#525252",
+        bg="#FFFFFF",
+        font=(FONT_FAMILY, 10),
+        wraplength=450,
+        justify="center",
+    )
+    detail_lbl.pack(pady=(0, 14))
+
+    style = ttk.Style()
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    style.configure(
+        "FluentGreen.Horizontal.TProgressbar",
+        troughcolor="#E2E2E2",
+        background="#0F6B4A",
+        bordercolor="#E2E2E2",
+        lightcolor="#0F6B4A",
+        darkcolor="#0F6B4A",
+        thickness=10,
     )
 
+    progress = ttk.Progressbar(
+        card,
+        mode="determinate",
+        length=420,
+        style="FluentGreen.Horizontal.TProgressbar",
+    )
+    progress.pack(pady=(0, 14))
 
-def _ensure_binaries():
-    """Download missing binaries with a simple splash window."""
-    try:
-        from .core import binary_manager
-        bin_dir = binary_manager.get_bin_dir()
-        binary_manager.apply_pending_update()
-        ytdlp_ok = (bin_dir / 'yt-dlp.exe').exists()
-        ffmpeg_ok = (bin_dir / 'ffmpeg.exe').exists() and (bin_dir / 'ffprobe.exe').exists()
+    err_frame = tk.Frame(card, bg="#FFFFFF")
+    result_holder: dict = {"report": None, "cancelled": False}
 
-        if ytdlp_ok and ffmpeg_ok:
-            return True
+    def on_close():
+        result_holder["cancelled"] = True
+        root.destroy()
 
-        import tkinter as tk
-        from tkinter import ttk, messagebox
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
-        root = tk.Tk()
-        root.title("yt-dlp GUI")
-        root.geometry("420x140")
-        root.resizable(False, False)
-        root.configure(bg='#1a1a2e')
+    def _start_bootstrap():
+        for w in err_frame.winfo_children():
+            w.destroy()
+        err_frame.pack_forget()
+        progress["value"] = 4
+        stage_lbl.config(text="步驟 1/3：檢查環境與引擎更新", fg="#0F6B4A")
+        detail_lbl.config(text="正在檢查 yt-dlp、FFmpeg 與下載資料夾...", fg="#525252")
 
-        try:
-            if getattr(sys, 'frozen', False):
-                icon_path = Path(sys._MEIPASS) / 'assets' / 'icon.ico'
-            else:
-                icon_path = Path(__file__).resolve().parent.parent.parent / 'assets' / 'icon.ico'
-            root.iconbitmap(str(icon_path))
-        except:
-            pass
+        def _on_progress(stage_num: int, stage_title: str, detail: str, pct: int):
+            def _ui():
+                if not root.winfo_exists():
+                    return
+                stage_lbl.config(text=f"步驟 {stage_num}/3：{stage_title}")
+                detail_lbl.config(text=detail)
+                progress["value"] = pct
 
-        tk.Label(root, text="First launch - downloading components...",
-                 fg='#e0e0e0', bg='#1a1a2e', font=('Segoe UI', 12)).pack(pady=(20, 5))
-        status = tk.Label(root, text="", fg='#a0a0a0', bg='#1a1a2e', font=('Segoe UI', 9))
-        status.pack(pady=(0, 10))
-        progress = ttk.Progressbar(root, mode='determinate', length=350)
-        progress.pack(pady=(0, 15))
+            root.after(0, _ui)
 
-        result = [False]
+        def _worker():
+            report = binary_manager.run_environment_bootstrap(progress_callback=_on_progress)
+            flush_logs()
+            root.after(0, lambda: _on_complete(report))
 
-        def update_status(msg, pct):
-            status.config(text=msg)
-            progress['value'] = pct
-            root.update()
+        threading.Thread(target=_worker, daemon=True).start()
 
-        def do_download():
-            result[0] = binary_manager.ensure_binaries(progress_callback=update_status)
-            root.after(0, root.destroy)
+    def _open_logs():
+        if os.name == "nt":
+            os.startfile(str(get_logs_dir()))
 
-        threading.Thread(target=do_download, daemon=True).start()
-        root.mainloop()
-
-        if not result[0]:
-            messagebox.showerror(
-                "Download failed",
-                "Could not download required components.\n"
-                "Check your internet connection and try again."
+    def _on_complete(report: binary_manager.BootstrapReport):
+        if not root.winfo_exists():
+            return
+        result_holder["report"] = report
+        if report.ok:
+            progress["value"] = 100
+            stage_lbl.config(text="環境檢查與二次驗證完成", fg="#0F6B4A")
+            detail_lbl.config(
+                text=f"yt-dlp {report.ytdlp_version} · FFmpeg 就緒 · 正在開啟主視窗",
+                fg="#1A1A1A",
             )
-            return False
-    except Exception as e:
-        logging.error("Binary download failed: %s", e)
-        return False
-    return True
+            root.after(300, root.destroy)
+        else:
+            stage_lbl.config(text="啟動檢查未通過", fg="#B42318")
+            detail_lbl.config(text=report.error_message, fg="#B42318")
+            err_frame.pack(pady=(2, 10))
+            tk.Button(
+                err_frame,
+                text="重試檢查",
+                font=(FONT_FAMILY, 10, "bold"),
+                bg="#0F6B4A",
+                fg="#FFFFFF",
+                relief="flat",
+                padx=14,
+                pady=6,
+                command=_start_bootstrap,
+            ).pack(side="left", padx=5)
+            tk.Button(
+                err_frame,
+                text="開啟紀錄資料夾",
+                font=(FONT_FAMILY, 10, "bold"),
+                bg="#FFFFFF",
+                fg="#1A1A1A",
+                relief="solid",
+                bd=1,
+                padx=12,
+                pady=6,
+                command=_open_logs,
+            ).pack(side="left", padx=5)
+            tk.Button(
+                err_frame,
+                text="關閉",
+                font=(FONT_FAMILY, 10),
+                bg="#FFFFFF",
+                fg="#1A1A1A",
+                relief="solid",
+                bd=1,
+                padx=12,
+                pady=6,
+                command=on_close,
+            ).pack(side="left", padx=5)
+
+    _start_bootstrap()
+    root.mainloop()
+
+    if result_holder["cancelled"]:
+        return None
+    report = result_holder["report"]
+    return report if (report and report.ok) else None
 
 
 def main():
-    """Main entry point"""
     try:
-        setup_logging()
-        if not _ensure_binaries():
+        get_log_manager()
+        report = run_startup_bootstrap_ui()
+        if not report or not report.ok:
             sys.exit(1)
-
-        app = YTDLPGUIApp()
-
-        # Auto-update yt-dlp in the background so a slow or blocked GitHub
-        # doesn't leave the process running with no visible window at startup.
-        def _has_active_downloads():
-            try:
-                from .core.download_manager import DownloadStatus
-                manager = app.download_manager
-                if manager.active_downloads:
-                    return True
-                return any(
-                    item.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING)
-                    for item in manager.get_queue()
-                )
-            except Exception:
-                return False
-
-        def _update_ytdlp():
-            try:
-                from .core import binary_manager
-                binary_manager.update_ytdlp(is_busy=_has_active_downloads)
-            except Exception:
-                pass
-
-        threading.Thread(target=_update_ytdlp, daemon=True).start()
-
+        app = YTDLPGUIApp(bootstrap_report=report)
         app.run()
     except Exception as e:
-        logging.error("Failed to start: %s", e)
+        logging.error("啟動失敗: %s", e, exc_info=True)
         sys.exit(1)
 
 

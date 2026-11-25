@@ -1,29 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Settings Manager
-Author: vokrob
-Date: 18.07.2025
+Portable Settings Manager - stores settings in <app_root>/data/settings.json
+and defaults output_directory to the system Downloads folder.
 """
 
 import json
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, Any
-import os
+from typing import Any, Dict
+
+from ytdlp_gui.utils.paths import get_data_dir, get_default_downloads_dir
 
 
 def _write_json_with_timeout(path: Path, data: Dict[str, Any], timeout: float = 3.0) -> bool:
-    """Write JSON to disk in a worker thread with a hard timeout.
-
-    Same reasoning as DownloadManager.save_queue: a stuck/redirected filesystem
-    must never block the app (e.g. when saving settings on exit).
-    """
+    """Write JSON to disk in a worker thread with a hard timeout."""
     result = [False]
 
     def _do_write():
         try:
-            with open(path, 'w', encoding='utf-8') as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             result[0] = True
         except Exception:
@@ -34,101 +30,88 @@ def _write_json_with_timeout(path: Path, data: Dict[str, Any], timeout: float = 
     thread.join(timeout)
     return result[0]
 
+
 class SettingsManager:
-    """Settings manager"""
-    
-    DEFAULT_SETTINGS = {
-        'output_directory': str(Path.home() / 'Desktop'),
-        'max_concurrent_downloads': 3,
-        'proxy_enabled': False,
-        'proxy_url': '',
-        'cookies_enabled': True,
-        'cookies_browser': 'chrome',  # Default browser for cookie extraction
-        'cookies_fallback_browsers': ['chrome', 'firefox', 'edge', 'safari'],
-        'notification_enabled': True,
-        'latest_update_info': '',  # Cached update info JSON string
-    }
-    
+    """Portable settings manager."""
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.settings_dir = self._get_settings_directory()
-        self.settings_file = self.settings_dir / 'settings.json'
+        self.settings_file = self.settings_dir / "settings.json"
+        self.DEFAULT_SETTINGS = {
+            "output_directory": str(get_default_downloads_dir()),
+            "max_concurrent_downloads": 2,
+            "theme_mode": "light",
+            "proxy_enabled": False,
+            "proxy_url": "",
+            "cookies_enabled": True,
+            "cookies_browser": "chrome",
+            "cookies_fallback_browsers": ["firefox", "edge", "chrome"],
+            "notification_enabled": True,
+        }
         self.settings = self.DEFAULT_SETTINGS.copy()
-        
-        # Ensure settings directory exists
+
         self.settings_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Load existing settings
         self.load_settings()
-        
+
     def _get_settings_directory(self) -> Path:
-        """Get the appropriate settings directory for the current OS"""
-        if os.name == 'nt':  # Windows
-            base_dir = Path(os.environ.get('APPDATA', Path.home()))
-        elif os.name == 'posix':
-            if 'darwin' in os.uname().sysname.lower():  # macOS
-                base_dir = Path.home() / 'Library' / 'Application Support'
-            else:  # Linux and other Unix-like
-                base_dir = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
-        else:
-            base_dir = Path.home()
-            
-        return base_dir / 'yt-dlp-gui'
-        
+        """Store portable settings inside <app_root>/data."""
+        return get_data_dir()
+
     def load_settings(self):
-        """Load settings from file"""
+        """Load settings from file."""
         try:
             if self.settings_file.exists():
-                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
                     saved_settings = json.load(f)
-                    
-                # Merge with defaults (in case new settings were added)
                 self.settings.update(saved_settings)
-                
-                self.logger.info("Settings loaded successfully")
+                self.logger.info("已載入設定檔: %s", self.settings_file)
             else:
-                self.logger.info("No settings file found, using defaults")
-                
+                self.logger.info("找不到設定檔，使用預設設定（存檔於 Downloads 資料夾）")
+                self.save_settings()
         except Exception as e:
-            self.logger.error(f"Failed to load settings: {e}")
-            self.logger.info("Using default settings")
-            
+            self.logger.error("讀取設定檔失敗: %s", e)
+
     def save_settings(self):
-        """Save current settings to file"""
+        """Save current settings to file."""
         try:
             if not _write_json_with_timeout(self.settings_file, self.settings):
-                self.logger.warning("Settings save skipped (filesystem did not respond in time)")
+                self.logger.warning("設定檔寫入逾時，已略過")
                 return
-
-            self.logger.info("Settings saved successfully")
-
+            self.logger.info("設定已儲存")
         except Exception as e:
-            self.logger.error(f"Failed to save settings: {e}")
+            self.logger.error("儲存設定檔失敗: %s", e)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Get a setting value"""
         return self.settings.get(key, default)
-        
+
     def set(self, key: str, value: Any):
-        """Set a setting value"""
         self.settings[key] = value
-        
+
     def get_output_directory(self) -> str:
-        """Get the current output directory"""
-        output_dir = self.get('output_directory')
-        
-        # Ensure the directory exists
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        return output_dir
+        """Return output directory; create or fall back to system Downloads."""
+        output_dir = self.get("output_directory") or str(get_default_downloads_dir())
+        try:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            return str(Path(output_dir))
+        except Exception as e:
+            self.logger.warning("自訂下載路徑無法使用 (%s)，退回系統 Downloads: %s", output_dir, e)
+            fallback = str(get_default_downloads_dir())
+            self.set("output_directory", fallback)
+            return fallback
+
+    def reset_output_directory(self) -> str:
+        """Reset output directory back to system default Downloads."""
+        default_dir = str(get_default_downloads_dir())
+        self.set("output_directory", default_dir)
+        self.save_settings()
+        return default_dir
 
     def get_network_settings(self) -> Dict[str, Any]:
-        """Get network-related settings"""
         return {
-            'proxy_enabled': self.get('proxy_enabled'),
-            'proxy_url': self.get('proxy_url'),
-            'cookies_enabled': self.get('cookies_enabled'),
-            'cookies_browser': self.get('cookies_browser'),
-            'cookies_fallback_browsers': self.get('cookies_fallback_browsers'),
+            "proxy_enabled": self.get("proxy_enabled"),
+            "proxy_url": self.get("proxy_url"),
+            "cookies_enabled": self.get("cookies_enabled"),
+            "cookies_browser": self.get("cookies_browser"),
+            "cookies_fallback_browsers": self.get("cookies_fallback_browsers"),
         }
-

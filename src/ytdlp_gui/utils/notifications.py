@@ -1,58 +1,53 @@
 # -*- coding: utf-8 -*-
 """
-Notifications
-Author: vokrob
-Date: 18.07.2025
+Notifications - Restrained Win11 Fluent toast notifications (Zero Emoji).
 """
 
 import logging
 from enum import Enum
 from tkinter import messagebox
+
 import customtkinter as ctk
 
+from ytdlp_gui.gui.icons import get_icon
+from ytdlp_gui.gui.theme import COLORS, RADIUS, font
 from ytdlp_gui.utils.error_translations import translate_error
 
+
 class NotificationType(Enum):
-    """Types of notifications"""
     INFO = "info"
     SUCCESS = "success"
     WARNING = "warning"
     ERROR = "error"
 
+
 class NotificationManager:
-    """Manages application notifications"""
-    
+    """Manages application notifications."""
+
     def __init__(self, parent_window=None):
         self.logger = logging.getLogger(__name__)
         self.parent_window = parent_window
         self.notifications_enabled = True
         self.toast_notifications = []
-        
+
     def set_parent_window(self, parent_window):
-        """Set the parent window for notifications"""
         self.parent_window = parent_window
-        
+
     def enable_notifications(self, enabled: bool):
-        """Enable or disable notifications"""
         self.notifications_enabled = enabled
-        
+
     def show_success(self, title: str, message: str, show_toast: bool = True):
-        """Show success notification"""
         self._show_notification(NotificationType.SUCCESS, title, message, show_toast)
-        
+
     def show_error(self, title: str, message: str, show_toast: bool = True, show_dialog: bool = False):
-        """Show error notification"""
         self._show_notification(NotificationType.ERROR, title, message, show_toast)
-        
         if show_dialog and self.parent_window:
             messagebox.showerror(title, message, parent=self.parent_window)
-            
+
     def _show_notification(self, notification_type: NotificationType, title: str, message: str, show_toast: bool):
-        """Internal method to show notifications"""
         if not self.notifications_enabled:
             return
-            
-        # Log the notification
+
         log_message = f"{title}: {message}"
         if notification_type == NotificationType.ERROR:
             self.logger.error(log_message)
@@ -60,241 +55,152 @@ class NotificationManager:
             self.logger.warning(log_message)
         else:
             self.logger.info(log_message)
-            
-        # Show toast notification if requested and parent window exists
+
         if show_toast and self.parent_window:
-            self._show_toast(notification_type, title, message)
-            
+            self.parent_window.after(0, lambda: self._show_toast(notification_type, title, message))
+
     def _show_toast(self, notification_type: NotificationType, title: str, message: str):
-        """Show a toast notification"""
         try:
             toast = ToastNotification(self.parent_window, notification_type, title, message)
             self.toast_notifications.append(toast)
-            
-            # Remove toast after it's closed
+
             def cleanup():
                 if toast in self.toast_notifications:
                     self.toast_notifications.remove(toast)
-                    
+
             toast.on_close = cleanup
-            
         except Exception as e:
-            self.logger.error(f"Failed to show toast notification: {e}")
+            self.logger.error("顯示通知視窗失敗: %s", e)
+
 
 class ToastNotification(ctk.CTkToplevel):
-    """Toast notification window"""
-    
+    """Restrained Win11 surface toast notification."""
+
     def __init__(self, parent, notification_type: NotificationType, title: str, message: str):
         super().__init__(parent)
-        
         self.notification_type = notification_type
         self.on_close = None
-        
         self.setup_window()
         self.setup_ui(title, message)
-        self.show_animation()
-        
-        # Auto-close after 5 seconds
-        self.after(5000, self.close_notification)
-        
+        self.after(4500, self.close_notification)
+
     def setup_window(self):
-        """Set up the toast window"""
         self.title("")
-        self.geometry("350x100")
+        self.geometry("400x104")
         self.resizable(False, False)
-        
-        # Remove window decorations
         self.overrideredirect(True)
-        
-        # Position at top-right of screen
         self.update_idletasks()
         screen_width = self.winfo_screenwidth()
-        x = screen_width - 370
-        y = 20
-        self.geometry(f"350x100+{x}+{y}")
-        
-        # Always on top
+        x = max(20, screen_width - 424)
+        self.geometry(f"400x104+{x}+24")
         self.attributes("-topmost", True)
-        
+
     def setup_ui(self, title: str, message: str):
-        """Set up the toast UI"""
-        bg_color = "#272727"
-        text_color = "#ffffff"
-        
-        # Main frame
-        main_frame = ctk.CTkFrame(self, fg_color=bg_color, corner_radius=10)
-        main_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # Icon and content frame
-        content_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        content_frame.pack(fill="both", expand=True, padx=15, pady=10)
-        content_frame.grid_columnconfigure(1, weight=1)
-        
-        # Icon
-        icons = {
-            NotificationType.INFO: "i",
-            NotificationType.SUCCESS: "OK",
-            NotificationType.WARNING: "!",
-            NotificationType.ERROR: "X",
-        }
-        
-        icon_label = ctk.CTkLabel(
-            content_frame,
-            text=icons.get(self.notification_type, "i"),
-            font=ctk.CTkFont(size=20),
-            text_color=text_color
+        is_error = self.notification_type in (NotificationType.ERROR, NotificationType.WARNING)
+        bg_color = COLORS["danger_bg"] if is_error else COLORS["bg_surface"]
+        border_color = COLORS["danger_border"] if is_error else COLORS["border_hairline"]
+        icon_name = "warning" if is_error else ("check" if self.notification_type == NotificationType.SUCCESS else "info")
+        icon_variant = "danger" if is_error else ("accent" if self.notification_type == NotificationType.SUCCESS else "muted")
+
+        main_frame = ctk.CTkFrame(
+            self,
+            fg_color=bg_color,
+            border_width=1,
+            border_color=border_color,
+            corner_radius=RADIUS["panel"],
         )
-        icon_label.grid(row=0, column=0, rowspan=2, padx=(0, 10), sticky="n")
-        
-        # Title
-        title_label = ctk.CTkLabel(
+        main_frame.pack(fill="both", expand=True)
+
+        content_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        content_frame.pack(fill="both", expand=True, padx=16, pady=14)
+        content_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            content_frame,
+            text="",
+            image=get_icon(icon_name, size=20, variant=icon_variant),
+        ).grid(row=0, column=0, rowspan=2, padx=(0, 12), sticky="n")
+
+        ctk.CTkLabel(
             content_frame,
             text=title,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=text_color,
-            anchor="w"
-        )
-        title_label.grid(row=0, column=1, sticky="ew")
-        
-        # Message
-        message_label = ctk.CTkLabel(
+            font=font(15, bold=True),
+            text_color=COLORS["danger"] if is_error else COLORS["text_primary"],
+            anchor="w",
+        ).grid(row=0, column=1, sticky="ew")
+
+        ctk.CTkLabel(
             content_frame,
             text=message,
-            font=ctk.CTkFont(size=10),
-            text_color=text_color,
+            font=font(14),
+            text_color=COLORS["text_secondary"],
             anchor="w",
-            wraplength=250
-        )
-        message_label.grid(row=1, column=1, sticky="ew")
-        
-        # Close button
-        close_btn = ctk.CTkButton(
+            justify="left",
+            wraplength=280,
+        ).grid(row=1, column=1, sticky="ew", pady=(2, 0))
+
+        ctk.CTkButton(
             content_frame,
-            text="x",
-            width=20,
-            height=20,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            text="",
+            image=get_icon("close", size=14, variant="muted"),
+            width=28,
+            height=28,
             fg_color="transparent",
-            text_color="#ffffff",
-            hover_color="#3a3a3a",
-            command=self.close_notification
-        )
-        close_btn.grid(row=0, column=2, sticky="ne")
-        
-        # Bind click to close
+            hover_color=COLORS["bg_control_hover"],
+            corner_radius=RADIUS["control"],
+            command=self.close_notification,
+        ).grid(row=0, column=2, sticky="ne")
+
         main_frame.bind("<Button-1>", lambda e: self.close_notification())
-        
-    def show_animation(self):
-        """Show the toast with animation"""
-        # Start off-screen
-        screen_width = self.winfo_screenwidth()
-        start_x = screen_width
-        end_x = screen_width - 370
-        
-        # Animate slide-in
-        def animate(step=0):
-            if step <= 20:
-                current_x = start_x - (start_x - end_x) * (step / 20)
-                self.geometry(f"350x100+{int(current_x)}+20")
-                self.after(10, lambda: animate(step + 1))
-                
-        animate()
-        
+
     def close_notification(self):
-        """Close the toast notification"""
-        # Animate slide-out
-        screen_width = self.winfo_screenwidth()
-        start_x = screen_width - 370
-        end_x = screen_width
-        
-        def animate(step=0):
-            if step <= 10:
-                current_x = start_x + (end_x - start_x) * (step / 10)
-                self.geometry(f"350x100+{int(current_x)}+20")
-                self.after(10, lambda: animate(step + 1))
-            else:
-                if self.on_close:
-                    self.on_close()
+        try:
+            if self.on_close:
+                self.on_close()
+            if self.winfo_exists():
                 self.destroy()
-                
-        animate()
+        except Exception:
+            pass
+
 
 class ErrorHandler:
-    """Centralized error handling"""
-    
+    """Centralized Traditional Chinese error handler."""
+
     def __init__(self, notification_manager: NotificationManager):
         self.logger = logging.getLogger(__name__)
         self.notification_manager = notification_manager
-        
-    def handle_download_error(self, error: Exception, url: str = "", show_user: bool = True):
-        """Handle download-related errors"""
-        error_msg = str(error).strip()
-        
-        # Categorize error types
-        if "network" in error_msg.lower() or "connection" in error_msg.lower():
-            user_msg = "Network connection error. Please check your internet connection."
-            title = "Network Error"
-        elif "not found" in error_msg.lower() or "404" in error_msg:
-            user_msg = "Video not found. The URL may be invalid or the video may have been removed."
-            title = "Video Not Found"
-        elif "private" in error_msg.lower() or "permission" in error_msg.lower():
-            user_msg = "This video is private or requires authentication."
-            title = "Access Denied"
-        elif "format" in error_msg.lower():
-            user_msg = "The requested format is not available for this video."
-            title = "Format Error"
-        else:
-            if not error_msg:
-                user_msg = ("Download failed without an error message. "
-                            "Check your internet connection and try again, or check the app log for details.")
-            else:
-                friendly = translate_error(error)
-                if friendly != error_msg:
-                    user_msg = friendly
-                else:
-                    user_msg = f"Download failed: {error_msg}"
-            title = "Download Error"
-            
-        # Log the full error
-        self.logger.error(f"Download error for {url}: {error}", exc_info=True)
-        
-        # Show user notification
-        if show_user:
-            self.notification_manager.show_error(title, user_msg, show_toast=True)
-            
-    def handle_unexpected_error(self, error: Exception, context: str = ""):
-        """Handle unexpected errors"""
-        title = "Unexpected Error"
-        user_msg = f"An unexpected error occurred. Please try again or contact support if the problem persists."
-        
-        if context:
-            log_msg = f"Unexpected error in {context}: {error}"
-        else:
-            log_msg = f"Unexpected error: {error}"
-            
-        self.logger.error(log_msg, exc_info=True)
-        self.notification_manager.show_error(title, user_msg, show_toast=True, show_dialog=True)
 
-# Global notification manager instance
+    def handle_download_error(self, error: Exception, url: str = "", show_user: bool = True):
+        user_msg = translate_error(error)
+        self.logger.error("下載失敗 (%s): %s", url, error)
+        if show_user:
+            self.notification_manager.show_error("下載未完成", user_msg, show_toast=True)
+
+    def handle_unexpected_error(self, error: Exception, context: str = ""):
+        user_msg = "發生未預期的狀況，請再試一次，或點右上角「設定與修復」複製診斷紀錄。"
+        self.logger.error("未預期錯誤 (%s): %s", context, error, exc_info=True)
+        self.notification_manager.show_error("系統提醒", user_msg, show_toast=True, show_dialog=True)
+
+
 _notification_manager = None
 _error_handler = None
 
+
 def get_notification_manager() -> NotificationManager:
-    """Get the global notification manager"""
     global _notification_manager
     if _notification_manager is None:
         _notification_manager = NotificationManager()
     return _notification_manager
 
+
 def get_error_handler() -> ErrorHandler:
-    """Get the global error handler"""
     global _error_handler
     if _error_handler is None:
         _error_handler = ErrorHandler(get_notification_manager())
     return _error_handler
 
+
 def init_notifications(parent_window):
-    """Initialize the notification system"""
     notification_manager = get_notification_manager()
     notification_manager.set_parent_window(parent_window)
     return notification_manager

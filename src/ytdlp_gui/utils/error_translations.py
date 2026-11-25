@@ -1,45 +1,90 @@
 # -*- coding: utf-8 -*-
 """
-Human-readable translations of common yt-dlp errors.
-Author: vokrob
+Human-readable Traditional Chinese translations of common yt-dlp errors.
 """
 
 import re
 
 ERROR_TRANSLATIONS = [
-    (r'failed to decrypt with DPAPI', 'Browser cookies are encrypted (Chrome/Edge App Bound Encryption) and cannot be read. Public videos download fine without cookies; for login-only videos export cookies via the "Get cookies.txt" extension and place cookies.txt next to the app'),
-    (r'unable to download video data.*HTTP Error 403', 'YouTube blocked the download. Browser cookies are outdated - export new ones via Get cookies.txt extension and place cookies.txt next to the program'),
-    (r'Unable to download M3U8|Failed to download M3U8|m3u8.*(?:error|failed)', 'Could not download the stream (HLS). The video may be region-locked or need cookies - try adding cookies.txt next to the program'),
-    (r'Unable to download (?:fragment|segment).*HTTP Error 40[13]', 'Stream fragment blocked (HTTP 40x). Try adding cookies.txt next to the program'),
-    (r'Server returned 40[13]|403 Forbidden', 'Access denied (HTTP 403). Try adding cookies.txt next to the program'),
-    (r'HTTP Error 40[13]', 'Access denied (HTTP 40x). Try adding cookies.txt next to the program'),
-    (r'HTTP Error 404', 'Video not found (HTTP 404). It may have been deleted or the link is wrong'),
-    (r'HTTP Error 429', 'Too many requests. Wait a few minutes and try again'),
-    (r'HTTP Error 5\d{2}', 'Server error (HTTP 5xx). Try again later'),
-    (r'Sign in to confirm', 'YouTube requires confirmation. Export browser cookies to cookies.txt and place next to the program'),
-    (r'confirm your age', 'Age restriction. Add cookies.txt from an account with confirmed age'),
-    (r'video\s+(?:is\s+)?unavailable', 'Video unavailable. It may have been deleted or is accessible by link only'),
-    (r'This video is private', 'This is a private video. Add cookies.txt from an account that has access'),
-    (r'ffprobe.*not found', 'FFmpeg not found - check your internet connection and restart the program'),
-    (r'ffmpeg.*not found', 'FFmpeg not found - check your internet connection and restart the program'),
-    (r'No video formats found', 'Could not get video formats. The video may be unavailable in your region'),
-    (r'Unable to extract', 'Could not process the page. The site may have changed or cookies are needed'),
-    (r'requested format not available', 'Requested quality is not available. Try another one'),
-    (r'ConnectionError.*reset', 'Connection reset. Check your internet and VPN'),
-    (r'Timeout', 'Connection timeout. Check your internet or try again later'),
-    (r'Certificate verify failed', 'SSL certificate error. Check the date and time on your computer'),
-    (r'Cloudflare', 'Blocked by Cloudflare protection. Try a VPN or add cookies.txt'),
-    (r'\[Errno \d+\]|Name or service not known|Temporary failure in name resolution|Network is unreachable|No route to host|getaddrinfo failed', 'Network error - check your internet connection and VPN'),
+    (
+        r"failed to decrypt with DPAPI",
+        "無法讀取瀏覽器登入狀態，一般歌曲不需要登入也能下載；若為會員限定影片，請點右上角「協助與修復」查看說明。",
+    ),
+    (
+        r"unable to download video data.*HTTP Error 403",
+        "YouTube 暫時拒絕連線（403），請點右上角「協助與修復 → 一鍵修復引擎」更新後再試一次。",
+    ),
+    (
+        r"Unable to download M3U8|Failed to download M3U8|m3u8.*(?:error|failed)",
+        "無法讀取串流音訊，可能是地區限制或網路不穩，請稍後再試一次。",
+    ),
+    (
+        r"Unable to download (?:fragment|segment).*HTTP Error 40[13]|Server returned 40[13]|403 Forbidden|HTTP Error 40[13]",
+        "YouTube 拒絕存取（403），建議點右上角「協助與修復 → 一鍵修復引擎」更新引擎後再試。",
+    ),
+    (
+        r"HTTP Error 404",
+        "找不到這首歌（404），可能已被刪除或網址輸入錯誤。",
+    ),
+    (
+        r"HTTP Error 429",
+        "短時間內下載太多次，YouTube 請您稍等幾分鐘後再試一次。",
+    ),
+    (
+        r"HTTP Error 5\d{2}",
+        "YouTube 伺服器暫時忙碌，請稍等一會兒再試。",
+    ),
+    (
+        r"Sign in to confirm|confirm your age|only available for registered users",
+        "這首歌有年齡或登入限制，YouTube 要求先登入帳號才能讀取。",
+    ),
+    (
+        r"video\s+(?:is\s+)?unavailable",
+        "這首歌目前無法播放，可能已被原作者刪除或有地區限制。",
+    ),
+    (
+        r"This video is private|private video",
+        "這支影片已被原作者設為「私人影片」，無法下載。",
+    ),
+    (
+        r"ffprobe.*not found|ffmpeg.*not found",
+        "找不到音樂轉檔元件（FFmpeg），請點右上角「協助與修復 → 一鍵修復引擎」自動補齊。",
+    ),
+    (
+        r"No video formats found|Unable to extract|failed to extract any player response",
+        "無法解析這首歌的音訊格式，請點右上角「協助與修復 → 一鍵修復引擎」更新下載引擎後再試。",
+    ),
+    (
+        r"requested format not available",
+        "這首歌目前沒有可用的音訊格式，請試試搜尋列表中的其他版本。",
+    ),
+    (
+        r"ConnectionError.*reset|Connection aborted|RemoteDisconnected",
+        "網路連線中斷，請檢查 Wi-Fi 或網路線後再試一次。",
+    ),
+    (
+        r"Timeout|timed out",
+        "連線等候逾時，網路可能比較慢，請再試一次。",
+    ),
+    (
+        r"Certificate verify failed",
+        "電腦日期或時間不正確導致安全連線失敗，請檢查右下角系統時間。",
+    ),
+    (
+        r"\[Errno \d+\]|Name or service not known|Temporary failure in name resolution|Network is unreachable|No route to host|getaddrinfo failed",
+        "目前沒有網路連線，請確認電腦已連上 Wi-Fi 或網路線。",
+    ),
 ]
 
 
 def translate_error(error: Exception) -> str:
-    """Convert common yt-dlp errors to human-readable messages"""
-    error_str = str(error)
+    """Convert common yt-dlp errors to plain Traditional Chinese messages."""
+    error_str = str(error or "").strip()
     for pattern, message in ERROR_TRANSLATIONS:
         if re.search(pattern, error_str, re.IGNORECASE):
             return message
-    # Fallback: truncate raw error
-    if len(error_str) > 200:
-        return error_str[:200] + '...'
-    return error_str
+    if not error_str:
+        return "下載失敗，請檢查網路後再試一次，或點右上角「協助與修復」複製查修紀錄。"
+    if len(error_str) > 160:
+        return f"下載時發生狀況：{error_str[:160]}..."
+    return f"下載時發生狀況：{error_str}"
