@@ -5,9 +5,10 @@ Package Entry Point & Native Win11 3-Stage Startup Environment Check Splash UI.
 
 import logging
 import os
+import re
 import sys
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 from .core import binary_manager
 from .gui.main_window import YTDLPGUIApp
@@ -205,6 +206,23 @@ def run_startup_bootstrap_ui() -> Optional[binary_manager.BootstrapReport]:
     return report if (report and report.ok) else None
 
 
+def make_progress_logger(logger: logging.Logger) -> Callable[[str, float], None]:
+    """Throttle progress callbacks to log only upon stage transitions or crossing 10% steps."""
+    last_stage: Optional[str] = None
+    last_step: int = -1
+
+    def _on_progress(msg: str, pct: float) -> None:
+        nonlocal last_stage, last_step
+        stage = re.sub(r"\d+", "", msg or "").strip()
+        step = int(pct * 10)
+        if stage != last_stage or step > last_step:
+            last_stage = stage
+            last_step = step
+            logger.info("[SELF_UPDATE_TEST] 下載進度 %d%%: %s", int(pct * 100), msg)
+
+    return _on_progress
+
+
 def run_self_update_test() -> int:
     """Headless E2E hook (--self-update-test) to exercise portable self-update end-to-end."""
     from . import __version__
@@ -241,9 +259,7 @@ def run_self_update_test() -> int:
         flush_logs()
         return 0
 
-    def _on_progress(msg: str, pct: float):
-        logger.info("[SELF_UPDATE_TEST] 下載進度 %d%%: %s", int(pct * 100), msg)
-
+    _on_progress = make_progress_logger(logger)
     prepared = checker.download_update(info, progress_callback=_on_progress)
     if not prepared.get("ok"):
         logger.error("[SELF_UPDATE_TEST] 下載或驗證更新失敗: %s", prepared.get("error"))
