@@ -24,19 +24,16 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Install UPX
-        uses: crazy-max/ghaction-upx@v3
-        with:
-          install-only: true
-
-      - name: Build executable
-        run: python build.py
+      - name: Build portable package and zip
+        run: python build.py --zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: yt-dlp-gui-windows-amd64
-          path: dist/yt-dlp-gui.exe
+          name: EasyMusicDL-win64-portable
+          path: |
+            dist/EasyMusicDL-v*-win64-portable.zip
+            dist/EasyMusicDL-v*-win64-portable.zip.sha256
 
   release:
     needs: build
@@ -48,14 +45,12 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          path: release
           merge-multiple: true
 
-      - name: Prepare release artifact
+      - name: Inspect release files
         shell: bash
         run: |
-          mkdir release
-          cp artifacts/yt-dlp-gui.exe release/yt-dlp-gui.exe
           echo "=== Release files ==="
           ls -lh release/
 

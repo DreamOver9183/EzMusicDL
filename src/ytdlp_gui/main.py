@@ -12,7 +12,7 @@ from typing import Optional
 from .core import binary_manager
 from .gui.main_window import YTDLPGUIApp
 from .gui.theme import apply_windows_titlebar
-from .utils.logger import flush_logs, get_log_manager
+from .utils.logger import flush_logs, get_log_manager, log_startup_environment
 from .utils.paths import get_logs_dir, get_resource_path
 
 FONT_FAMILY = "Microsoft JhengHei UI"
@@ -205,16 +205,83 @@ def run_startup_bootstrap_ui() -> Optional[binary_manager.BootstrapReport]:
     return report if (report and report.ok) else None
 
 
+def run_self_update_test() -> int:
+    """Headless E2E hook (--self-update-test) to exercise portable self-update end-to-end."""
+    from . import __version__
+    from .core.settings_manager import SettingsManager
+    from .core.update_checker import UpdateChecker
+
+    get_log_manager()
+    log_startup_environment({"RunMode": "self-update-test"})
+    logger = logging.getLogger("ytdlp_gui.self_update_test")
+
+    settings = SettingsManager()
+    checker = UpdateChecker(settings)
+    logger.info(
+        "[SELF_UPDATE_TEST] 開始檢查更新 (version=%s, frozen=%s, app_root=%s, repo=%s)",
+        __version__,
+        checker.is_frozen(),
+        checker.get_app_root(),
+        checker.repo,
+    )
+
+    info = checker.check(force=True)
+    logger.info(
+        "[SELF_UPDATE_TEST] 檢查結果: status=%s | available=%s | current=%s | latest=%s | asset=%s | checksum=%s",
+        info.get("status"),
+        info.get("available"),
+        info.get("current_version"),
+        info.get("latest_version"),
+        info.get("asset_name"),
+        bool(info.get("checksum_url")),
+    )
+
+    if not info.get("available"):
+        logger.info("[SELF_UPDATE_TEST] 無須更新或無可用更新 (status=%s)", info.get("status"))
+        flush_logs()
+        return 0
+
+    def _on_progress(msg: str, pct: float):
+        logger.info("[SELF_UPDATE_TEST] 下載進度 %d%%: %s", int(pct * 100), msg)
+
+    prepared = checker.download_update(info, progress_callback=_on_progress)
+    if not prepared.get("ok"):
+        logger.error("[SELF_UPDATE_TEST] 下載或驗證更新失敗: %s", prepared.get("error"))
+        flush_logs()
+        return 2
+
+    if not checker.is_frozen():
+        logger.info("[SELF_UPDATE_TEST] 非冷凍執行檔（原始碼模式），略過實際檔案替換")
+        flush_logs()
+        return 0
+
+    applied = checker.apply_update(prepared)
+    if not applied:
+        logger.error("[SELF_UPDATE_TEST] 啟動背景更新程式失敗")
+        flush_logs()
+        return 3
+
+    logger.info("[SELF_UPDATE_TEST] 更新背景程序已啟動，即將結束舊版程式以完成替換與重啟")
+    flush_logs()
+    return 0
+
+
 def main():
+    if "--self-update-test" in sys.argv:
+        sys.exit(run_self_update_test())
     try:
         get_log_manager()
+        log_startup_environment()
         report = run_startup_bootstrap_ui()
         if not report or not report.ok:
+            logging.warning("啟動環境檢查未通過或被使用者取消，結束程式")
+            flush_logs()
             sys.exit(1)
         app = YTDLPGUIApp(bootstrap_report=report)
         app.run()
     except Exception as e:
         logging.error("啟動失敗: %s", e, exc_info=True)
+        flush_logs()
         sys.exit(1)
 
 

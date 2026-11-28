@@ -3,14 +3,17 @@
 Main GUI window - Native Windows 11 Fluent Utility for Pure MP3 Music Downloading.
 """
 
+import sys
 from tkinter import messagebox
 from typing import Optional
 
 import customtkinter as ctk
 
+from ytdlp_gui import __version__
 from ytdlp_gui.core import binary_manager
 from ytdlp_gui.core.download_manager import DownloadManager
 from ytdlp_gui.core.settings_manager import SettingsManager
+from ytdlp_gui.core.update_checker import UpdateChecker
 from ytdlp_gui.gui.components.help_dialog import HelpDialog
 from ytdlp_gui.gui.components.music_search_view import MusicSearchView
 from ytdlp_gui.gui.components.my_music_view import MyMusicView
@@ -36,6 +39,9 @@ class YTDLPGUIApp:
         ctk.set_appearance_mode(theme_mode)
 
         self.download_manager = DownloadManager(self.settings_manager)
+        self.update_checker = UpdateChecker(self.settings_manager)
+        self._latest_update_info: Optional[dict] = None
+        self._update_banner_dismissed = False
 
         self.root = ctk.CTk()
         self.root.title("音樂下載工具")
@@ -48,6 +54,7 @@ class YTDLPGUIApp:
         self.root.bind("<FocusIn>", self._on_window_focus)
         self.root.after(50, lambda: apply_windows_titlebar(self.root, theme_mode))
         self.root.after(200, self._set_window_icon)
+        self.root.after(1500, self._start_background_update_check)
 
         self.notification_manager = init_notifications(self.root)
         self.notification_manager.enable_notifications(
@@ -147,7 +154,63 @@ class YTDLPGUIApp:
         self.content_frame = ctk.CTkFrame(self.root, fg_color="transparent")
         self.content_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=16)
         self.content_frame.grid_columnconfigure(0, weight=1)
-        self.content_frame.grid_rowconfigure(0, weight=1)
+        self.content_frame.grid_rowconfigure(1, weight=1)
+
+        # App update notification banner (hidden until a newer release is detected)
+        self.update_banner = ctk.CTkFrame(
+            self.content_frame,
+            fg_color=COLORS["accent_subtle"],
+            border_width=1,
+            border_color=COLORS["accent_border"],
+            corner_radius=RADIUS["panel"],
+        )
+        self.update_banner.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self.update_banner,
+            text="",
+            image=get_icon("info", size=18, variant="accent"),
+        ).grid(row=0, column=0, padx=(16, 10), pady=12)
+
+        self.update_banner_lbl = ctk.CTkLabel(
+            self.update_banner,
+            text="",
+            font=font(16, bold=True),
+            text_color=COLORS["text_primary"],
+            anchor="w",
+        )
+        self.update_banner_lbl.grid(row=0, column=1, pady=12, sticky="w")
+
+        update_banner_btns = ctk.CTkFrame(self.update_banner, fg_color="transparent")
+        update_banner_btns.grid(row=0, column=2, padx=14, pady=10, sticky="e")
+
+        ctk.CTkButton(
+            update_banner_btns,
+            text="前往更新",
+            height=38,
+            width=108,
+            font=font(15, bold=True),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["accent_text"],
+            corner_radius=RADIUS["control"],
+            command=self._open_help_for_update,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            update_banner_btns,
+            text="稍後提醒",
+            height=38,
+            width=92,
+            font=font(15),
+            fg_color=COLORS["bg_control"],
+            hover_color=COLORS["bg_control_hover"],
+            text_color=COLORS["text_primary"],
+            border_width=1,
+            border_color=COLORS["border_input"],
+            corner_radius=RADIUS["control"],
+            command=self._dismiss_update_banner,
+        ).pack(side="left")
 
         self.library_view = MyMusicView(
             self.content_frame,
@@ -205,14 +268,15 @@ class YTDLPGUIApp:
 
     def _build_engine_status_text(self) -> str:
         if self.bootstrap_report and self.bootstrap_report.ok:
-            return f"引擎驗證通過 · yt-dlp {self.bootstrap_report.ytdlp_version}"
+            return f"v{__version__} · 引擎驗證通過 · yt-dlp {self.bootstrap_report.ytdlp_version}"
         st = binary_manager.get_engine_status()
-        return f"引擎就緒 · yt-dlp {st['ytdlp']}"
+        return f"v{__version__} · 引擎就緒 · yt-dlp {st['ytdlp']}"
 
     def _switch_tab(self, tab: str):
+        self.logger.info("[UI] 切換分頁: %s", tab)
         if tab == "search":
             self.library_view.grid_remove()
-            self.search_view.grid(row=0, column=0, sticky="nsew")
+            self.search_view.grid(row=1, column=0, sticky="nsew")
             self.tab_search_btn.configure(
                 fg_color=COLORS["accent_subtle"],
                 hover_color=COLORS["accent_subtle"],
@@ -231,7 +295,7 @@ class YTDLPGUIApp:
         else:
             self.search_view.grid_remove()
             self.library_view.refresh_list()
-            self.library_view.grid(row=0, column=0, sticky="nsew")
+            self.library_view.grid(row=1, column=0, sticky="nsew")
             self.tab_library_btn.configure(
                 fg_color=COLORS["accent_subtle"],
                 hover_color=COLORS["accent_subtle"],
@@ -260,18 +324,83 @@ class YTDLPGUIApp:
 
     def _on_theme_selected(self, value: str):
         mode = "dark" if value == "深色" else "light"
+        self.logger.info("[UI] 切換主題模式: %s", mode)
         self.settings_manager.set("theme_mode", mode)
         self.settings_manager.save_settings()
         ctk.set_appearance_mode(mode)
         apply_windows_titlebar(self.root, mode)
 
     def _open_help_dialog(self):
+        self.logger.info("[UI] 開啟設定與修復視窗")
         HelpDialog(
             self.root,
             settings_manager=self.settings_manager,
             on_path_changed=self._on_save_path_changed,
             on_engine_repaired=self._on_engine_repaired,
+            update_checker=self.update_checker,
+            initial_update_info=self._latest_update_info,
+            download_manager=self.download_manager,
+            on_app_exit_for_update=self._exit_for_update,
+            on_update_checked=self._on_manual_update_checked,
         )
+
+    def _start_background_update_check(self):
+        import threading
+
+        def _worker():
+            info = self.update_checker.check(force=False)
+            try:
+                self.root.after(0, lambda: self._on_background_update_checked(info))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_background_update_checked(self, info: Optional[dict]):
+        if not info:
+            return
+        self._latest_update_info = info
+        if info.get("available") and not self._update_banner_dismissed:
+            latest = info.get("latest_version", "")
+            self.update_banner_lbl.configure(
+                text=f"發現應用程式新版本 v{latest}（目前 v{__version__}），可立即更新"
+            )
+            self.update_banner.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+    def _on_manual_update_checked(self, info: Optional[dict]):
+        if not info:
+            return
+        self._latest_update_info = info
+        if info.get("available") and not self._update_banner_dismissed:
+            latest = info.get("latest_version", "")
+            self.update_banner_lbl.configure(
+                text=f"發現應用程式新版本 v{latest}（目前 v{__version__}），可立即更新"
+            )
+            self.update_banner.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        elif not info.get("available"):
+            self.update_banner.grid_remove()
+
+    def _dismiss_update_banner(self):
+        self._update_banner_dismissed = True
+        self.update_banner.grid_remove()
+
+    def _open_help_for_update(self):
+        self._open_help_dialog()
+
+    def _exit_for_update(self):
+        self.logger.info("[UPDATE] 結束主程式以套用免安裝版更新")
+        try:
+            self.download_manager.stop_all_downloads()
+            self.settings_manager.save_settings()
+        except Exception as e:
+            self.logger.warning("[UPDATE] 結束前儲存設定發生警告: %s", e)
+        flush_logs()
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
 
     def _on_save_path_changed(self, new_path: str):
         self.status_right_lbl.configure(text=f"存檔位置：{new_path}  （MP3）")
