@@ -99,6 +99,7 @@ def create_pyinstaller_spec() -> Path:
         "ytdlp_gui.core.cookie_manager",
         "ytdlp_gui.core.download_manager",
         "ytdlp_gui.core.history_manager",
+        "ytdlp_gui.core.process_tracker",
         "ytdlp_gui.core.settings_manager",
         "ytdlp_gui.core.update_checker",
         "ytdlp_gui.core.ytdlp_wrapper",

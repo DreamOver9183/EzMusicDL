@@ -120,3 +120,18 @@ def offline_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(socket.socket, "connect_ex", _violation)
     monkeypatch.setattr(socket, "create_connection", _violation)
     monkeypatch.setattr(socket, "getaddrinfo", _violation)
+
+
+@pytest.fixture(autouse=True)
+def process_tracker_instance(monkeypatch: pytest.MonkeyPatch):
+    """
+    Autouse fixture providing an isolated ProcessTracker for each test.
+    Shuts down and cleans up any remaining child processes after the test.
+    """
+    from ytdlp_gui.core import process_tracker
+    from ytdlp_gui.core.process_tracker import ProcessTracker
+
+    tracker_instance = ProcessTracker()
+    monkeypatch.setattr(process_tracker, "tracker", tracker_instance)
+    yield tracker_instance
+    tracker_instance.shutdown()

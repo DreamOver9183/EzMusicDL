@@ -47,7 +47,7 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-預設執行 100 個離線測試。需要外部工具或外網的測試標記為 `network`，以 `python -m pytest tests -q -m network` 另外執行。
+預設執行 125 個離線測試。需要外部工具或外網的測試標記為 `network`，以 `python -m pytest tests -q -m network` 另外執行。
 
 ## 使用方式
 
