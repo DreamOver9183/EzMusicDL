@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from ytdlp_gui.utils.error_translations import analyze_error
 
-from . import binary_manager
+from . import binary_manager, process_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -206,30 +206,57 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
         _cmd_str(cmd),
     )
     started = time.perf_counter()
+    proc = None
     try:
-        result = subprocess.run(
+        proc = process_tracker.tracker.spawn(
             cmd,
-            capture_output=True,
+            group="parse",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             creationflags=_create_no_window_flag(),
             env=_subprocess_env(),
         )
+        try:
+            stdout_text, stderr_text = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process_tracker.kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if process_tracker.tracker.was_terminated(proc):
+                logger.info("[SEARCH] 已取消 (elapsed=%dms, target=%s)", elapsed_ms, clean_query)
+                _set_last_error("已取消")
+                return []
+            msg = f"搜尋逾時 ({timeout}s)，請檢查網路連線後再試一次"
+            _set_last_error(msg)
+            _set_last_diagnostics([], msg)
+            logger.warning("[SEARCH] 逾時 (elapsed=%dms, target=%s)", elapsed_ms, clean_query)
+            return []
+
+        if process_tracker.tracker.was_terminated(proc):
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("[SEARCH] 已取消 (elapsed=%dms, target=%s)", elapsed_ms, clean_query)
+            _set_last_error("已取消")
+            return []
+
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        stderr_raw = (result.stderr or "").strip()
+        stderr_raw = (stderr_text or "").strip()
         stderr_lines, warnings = _split_stderr_lines(stderr_raw)
         _set_last_diagnostics(warnings, stderr_raw[:4000])
         _log_stderr_lines(stderr_lines, "[SEARCH]")
 
-        if result.returncode != 0:
-            msg = _extract_primary_error(stderr_lines, fallback=(result.stdout or ""))
+        if proc.returncode != 0:
+            msg = _extract_primary_error(stderr_lines, fallback=(stdout_text or ""))
             diag = analyze_error(msg)
-            _set_last_error(msg or f"搜尋失敗 (code={result.returncode})")
+            _set_last_error(msg or f"搜尋失敗 (code={proc.returncode})")
             logger.error(
                 "[SEARCH] 失敗 (rc=%s, elapsed=%dms, err_code=%s, warnings=%d): %s",
-                result.returncode,
+                proc.returncode,
                 elapsed_ms,
                 diag.code,
                 len(warnings),
@@ -237,7 +264,7 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
             )
             return []
 
-        raw = (result.stdout or "").strip()
+        raw = (stdout_text or "").strip()
         if not raw:
             _set_last_error("找不到符合的歌曲")
             logger.warning("[SEARCH] 回傳空結果 (elapsed=%dms, query=%s)", elapsed_ms, clean_query)
@@ -274,12 +301,10 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
             clean_query,
         )
         return results
-    except subprocess.TimeoutExpired:
+    except process_tracker.ProcessCancelled:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        msg = f"搜尋逾時 ({timeout}s)，請檢查網路連線後再試一次"
-        _set_last_error(msg)
-        _set_last_diagnostics([], msg)
-        logger.warning("[SEARCH] 逾時 (elapsed=%dms, target=%s)", elapsed_ms, clean_query)
+        logger.info("[SEARCH] 已取消 (elapsed=%dms, target=%s)", elapsed_ms, clean_query)
+        _set_last_error("已取消")
         return []
     except Exception as e:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -288,6 +313,11 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
         _set_last_diagnostics([], msg)
         logger.error("[SEARCH] 例外 (elapsed=%dms): %s", elapsed_ms, e, exc_info=True)
         return []
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                process_tracker.kill_process_tree(proc)
+            process_tracker.tracker.release(proc)
 
 
 def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> Optional[dict]:
@@ -306,30 +336,57 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
 
     logger.info("[INFO] %s", _cmd_str(cmd))
     started = time.perf_counter()
+    proc = None
     try:
-        result = subprocess.run(
+        proc = process_tracker.tracker.spawn(
             cmd,
-            capture_output=True,
+            group="info",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             creationflags=_create_no_window_flag(),
             env=_subprocess_env(),
         )
+        try:
+            stdout_text, stderr_text = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process_tracker.kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if process_tracker.tracker.was_terminated(proc):
+                logger.info("[INFO] 已取消 (elapsed=%dms, url=%s)", elapsed_ms, url)
+                _set_last_error("已取消")
+                return None
+            msg = f"連線逾時 ({timeout}s)"
+            _set_last_error(msg)
+            _set_last_diagnostics([], msg)
+            logger.warning("[INFO] %s for %s (elapsed=%dms)", msg, url, elapsed_ms)
+            return None
+
+        if process_tracker.tracker.was_terminated(proc):
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("[INFO] 已取消 (elapsed=%dms, url=%s)", elapsed_ms, url)
+            _set_last_error("已取消")
+            return None
+
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        stderr_raw = (result.stderr or "").strip()
+        stderr_raw = (stderr_text or "").strip()
         stderr_lines, warnings = _split_stderr_lines(stderr_raw)
         _set_last_diagnostics(warnings, stderr_raw[:4000])
         _log_stderr_lines(stderr_lines, "[INFO]")
 
-        if result.returncode != 0:
-            msg = _extract_primary_error(stderr_lines, fallback=(result.stdout or ""))
+        if proc.returncode != 0:
+            msg = _extract_primary_error(stderr_lines, fallback=(stdout_text or ""))
             diag = analyze_error(msg)
-            _set_last_error(msg or f"extract_info failed (code={result.returncode})")
+            _set_last_error(msg or f"extract_info failed (code={proc.returncode})")
             logger.warning(
                 "[INFO] 失敗 (rc=%s, elapsed=%dms, err_code=%s, warnings=%d): %s",
-                result.returncode,
+                proc.returncode,
                 elapsed_ms,
                 diag.code,
                 len(warnings),
@@ -338,7 +395,7 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
             return None
 
         _set_last_error("")
-        parsed = json.loads(result.stdout) if (result.stdout or "").strip() else None
+        parsed = json.loads(stdout_text) if (stdout_text or "").strip() else None
         if isinstance(parsed, dict):
             logger.info(
                 "[INFO] 成功 (elapsed=%dms, warnings=%d): id=%s, title=%s, age_limit=%s, availability=%s, formats=%d",
@@ -351,12 +408,10 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
                 len(parsed.get("formats") or []),
             )
         return parsed
-    except subprocess.TimeoutExpired:
+    except process_tracker.ProcessCancelled:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        msg = f"連線逾時 ({timeout}s)"
-        _set_last_error(msg)
-        _set_last_diagnostics([], msg)
-        logger.warning("[INFO] %s for %s (elapsed=%dms)", msg, url, elapsed_ms)
+        logger.info("[INFO] 已取消 (elapsed=%dms, url=%s)", elapsed_ms, url)
+        _set_last_error("已取消")
         return None
     except Exception as e:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -365,6 +420,11 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
         _set_last_diagnostics([], msg)
         logger.warning("[INFO] 錯誤 (elapsed=%dms): %s", elapsed_ms, e, exc_info=True)
         return None
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                process_tracker.kill_process_tree(proc)
+            process_tracker.tracker.release(proc)
 
 
 def extract_info_flat(url: str, extra_args: List[str] = None) -> Optional[dict]:
@@ -465,6 +525,7 @@ def download(
     format_spec: str,
     extra_args: List[str] = None,
     progress_callback: Callable = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> int:
     """Download audio using yt-dlp subprocess with UTF-8 output parsing and rich logging."""
     ytdlp_exe = find_ytdlp()
@@ -497,14 +558,24 @@ def download(
     detected_filepath = ""
     logged_milestones = set()
 
+    proc = None
     try:
-        proc = subprocess.Popen(
+        proc = process_tracker.tracker.spawn(
             cmd,
+            group="download",
+            cancel_event=cancel_event,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=flags,
             env=_subprocess_env(),
         )
+
+        def _is_cancelled() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return True
+            if proc is not None and process_tracker.tracker.was_terminated(proc):
+                return True
+            return False
 
         def _collect_stderr():
             for raw_line in iter(proc.stderr.readline, b""):
@@ -528,6 +599,9 @@ def download(
         stderr_thread.start()
 
         for raw_line in iter(proc.stdout.readline, b""):
+            if _is_cancelled():
+                break
+
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -548,7 +622,7 @@ def download(
                     detected_filepath = candidate
 
             if "[ExtractAudio]" in line or "[Metadata]" in line or "[EmbedThumbnail]" in line:
-                if progress_callback:
+                if progress_callback and not _is_cancelled():
                     update = {"stage": "converting", "percent": 94.0}
                     if detected_filepath:
                         update["filepath"] = detected_filepath
@@ -567,8 +641,11 @@ def download(
                             progress.get("speed", ""),
                             progress.get("eta", ""),
                         )
-                if progress_callback:
+                if progress_callback and not _is_cancelled():
                     progress_callback(progress)
+
+        if _is_cancelled() and proc.poll() is None:
+            process_tracker.kill_process_tree(proc)
 
         proc.wait()
         stderr_thread.join(timeout=2.0)
@@ -576,6 +653,10 @@ def download(
             proc.stderr.close()
         except Exception:
             pass
+
+        if _is_cancelled():
+            _set_last_error("")
+            return -1
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         full_stderr = "\n".join(stderr_lines)
@@ -598,7 +679,7 @@ def download(
                 detected_filepath or "(unknown)",
                 file_size,
             )
-            if progress_callback:
+            if progress_callback and not _is_cancelled():
                 done_payload = {"percent": 100.0, "stage": "completed"}
                 if detected_filepath:
                     done_payload["filepath"] = detected_filepath
@@ -617,11 +698,20 @@ def download(
                 reason,
             )
             _set_last_error(reason)
-            if progress_callback:
+            if progress_callback and not _is_cancelled():
                 progress_callback({"percent": 0, "stage": "failed"})
 
         return proc.returncode
+    except process_tracker.ProcessCancelled:
+        _set_last_error("")
+        return -1
     except Exception as e:
+        if cancel_event is not None and cancel_event.is_set():
+            _set_last_error("")
+            return -1
+        if proc is not None and process_tracker.tracker.was_terminated(proc):
+            _set_last_error("")
+            return -1
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.error("[CMD_EXC] yt-dlp download failed (elapsed=%dms): %s", elapsed_ms, e, exc_info=True)
         _set_last_error(str(e) or f"yt-dlp download failed: {e}")
@@ -629,3 +719,8 @@ def download(
         if progress_callback:
             progress_callback({"error": str(e), "stage": "failed"})
         return -1
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                process_tracker.kill_process_tree(proc)
+            process_tracker.tracker.release(proc)

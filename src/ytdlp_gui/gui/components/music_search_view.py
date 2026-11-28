@@ -14,7 +14,7 @@ import customtkinter as ctk
 import requests
 from PIL import Image
 
-from ytdlp_gui.core import ytdlp_wrapper
+from ytdlp_gui.core import process_tracker, ytdlp_wrapper
 from ytdlp_gui.core.download_manager import DownloadStatus
 from ytdlp_gui.gui.icons import get_icon, get_placeholder_thumb
 from ytdlp_gui.gui.theme import COLORS, RADIUS, font
@@ -315,6 +315,8 @@ class MusicSearchView(ctk.CTkFrame):
 
     def _search_worker(self, query: str):
         results = ytdlp_wrapper.search_youtube(query, max_results=8, timeout=30)
+        if process_tracker.tracker.shutting_down:
+            return
         err = ytdlp_wrapper.get_last_error() if not results else ""
         if not results:
             diag = analyze_error(err)
@@ -326,6 +328,8 @@ class MusicSearchView(ctk.CTkFrame):
             )
         else:
             self.logger.info("[UI_SEARCH] 搜尋成功: %d 筆結果 (query=%s)", len(results), query)
+        if process_tracker.tracker.shutting_down:
+            return
         self.after(0, lambda: self._on_search_finished(query, results, err))
 
     def _on_search_finished(self, query: str, results: List[dict], err: str):
@@ -538,6 +542,8 @@ class MusicSearchView(ctk.CTkFrame):
 
         def _enqueue():
             try:
+                if process_tracker.tracker.shutting_down:
+                    return
                 out_dir = self.settings_manager.get_output_directory()
                 dl_id = self.download_manager.add_download(
                     url=url,
@@ -545,11 +551,14 @@ class MusicSearchView(ctk.CTkFrame):
                     output_path=out_dir,
                     video_title=song["title"],
                 )
+                if process_tracker.tracker.shutting_down:
+                    return
                 self.url_to_download_id[url] = dl_id
                 self.download_manager.add_progress_callback(
-                    dl_id, lambda u=url, d=dl_id: self.after(0, lambda: self._sync_card_with_download(u, d))
+                    dl_id, lambda u=url, d=dl_id: (not process_tracker.tracker.shutting_down) and self.after(0, lambda: self._sync_card_with_download(u, d))
                 )
-                self.after(0, lambda: self._sync_card_with_download(url, dl_id))
+                if not process_tracker.tracker.shutting_down:
+                    self.after(0, lambda: self._sync_card_with_download(url, dl_id))
             except Exception as e:
                 self.logger.error("加入下載失敗: %s", e)
 
