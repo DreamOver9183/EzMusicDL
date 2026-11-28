@@ -54,6 +54,8 @@
 - 暗黑工作台改版期間：里程碑合併後，只含文件的更新（本檔、`docs/rgs/design.md`、`docs/rgs/reviews/`）直接提交到 `main`；其他變更一律走 PR。合併審查報告不貼 PR 留言。
 - CI（`.github/workflows/build.yml`）只在推送 `v*` tag 時執行。`release.ps1` 會以當天日期建立 tag 並推送 `main`，未經使用者同意不得執行。
 - 刪除或修改公開 Release 須另外取得使用者同意。
+- 所有 `gh` 指令帶 `--repo DreamOver9183/EzMusicDL`；執行會呼叫 `gh` 的 `rgs` 腳本時設定環境變數 `GH_REPO=DreamOver9183/EzMusicDL`。不得對 `upstream`（原作者專案）做任何寫入。
+- PR 要等合併閘門完成並通過後才請使用者合併。
 - 測試：pytest，放在 `tests/`；不得寫入 repo 內的 `data/`、`logs/`，離線測試不得連網或啟動真實下載。
 - `tests/conftest.py` 自動套用兩層保護：`app_root` 把程式目錄、下載夾與工作目錄導向暫存位置；離線防護封鎖 socket 與 `ytdlp_wrapper` 的網路呼叫（標 `network` 者除外）。離線防護不封鎖 `subprocess`。
 - 新增匯入 `get_default_downloads_dir` 的模組時，要在 `app_root` fixture 補上替換，否則測試會指向使用者真正的下載夾。
@@ -75,6 +77,8 @@
 - 產生的 `.ps1` 含中文路徑與文字 → Windows PowerShell 5.1 需要 BOM 才會以 UTF-8 讀取 → 維持以 `utf-8-sig` 寫檔。
 
 ### 版控與測試
+
+- 開 PR 失敗並回報分支沒有 commit，或審查腳本找不到剛開的 PR → 本機有 `upstream` remote，`gh` 未指定 repo 時操作原作者專案 → 依「慣例」指定本專案 repo。
 
 - 新增的 `tests/test_*.py` 沒出現在 `git status`，提交時漏掉 → `.gitignore` 的 `test_*`（原意是忽略測試下載檔）一併忽略測試檔 → 已加 `!tests/**/test_*.py`；新增檔案後確認 git 看得到。
 - 用類別屬性保存原始函式後，`is` 比對失敗 → 透過實例讀取類別屬性會變成 bound method → 用 `types.SimpleNamespace` 保存。
