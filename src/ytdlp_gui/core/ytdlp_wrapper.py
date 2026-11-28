@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-yt-dlp CLI wrapper - UTF-8 safe subprocess calls for search, metadata, and MP3 download.
+yt-dlp CLI wrapper - UTF-8 safe subprocess calls for search, metadata, and MP3 download,
+with rich structured logging and warning/error preservation.
 """
 
 import json
@@ -10,14 +11,19 @@ import platform
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+
+from ytdlp_gui.utils.error_translations import analyze_error
 
 from . import binary_manager
 
 logger = logging.getLogger(__name__)
 
 _last_error = threading.local()
+_last_warnings = threading.local()
+_last_stderr = threading.local()
 
 
 def _set_last_error(msg: str):
@@ -27,6 +33,21 @@ def _set_last_error(msg: str):
 def get_last_error() -> str:
     """Get the last yt-dlp error message from current thread."""
     return getattr(_last_error, "msg", "")
+
+
+def _set_last_diagnostics(warnings: List[str], stderr_text: str):
+    _last_warnings.items = list(warnings)
+    _last_stderr.text = stderr_text
+
+
+def get_last_warnings() -> List[str]:
+    """Get yt-dlp warnings captured during the last call on current thread."""
+    return list(getattr(_last_warnings, "items", []))
+
+
+def get_last_stderr() -> str:
+    """Get full stderr output captured during the last call on current thread."""
+    return getattr(_last_stderr, "text", "")
 
 
 def _create_no_window_flag() -> int:
@@ -62,6 +83,34 @@ def _ffmpeg_args() -> List[str]:
 
 def _cmd_str(cmd: List[str]) -> str:
     return " ".join(f'"{c}"' if " " in c else c for c in cmd)
+
+
+def _split_stderr_lines(stderr_text: str) -> Tuple[List[str], List[str]]:
+    """Split stderr into non-empty lines and extract WARNING lines."""
+    lines = [ln.strip() for ln in (stderr_text or "").splitlines() if ln.strip()]
+    warnings = [ln for ln in lines if "WARNING:" in ln]
+    return lines, warnings
+
+
+def _log_stderr_lines(lines: List[str], tag: str) -> None:
+    """Log yt-dlp stderr lines by severity."""
+    for line in lines:
+        if "ERROR:" in line:
+            logger.error("%s [YTDLP_ERR] %s", tag, line[:500])
+        elif "WARNING:" in line:
+            logger.warning("%s [YTDLP_WARN] %s", tag, line[:500])
+        else:
+            logger.debug("%s [YTDLP_STDERR] %s", tag, line[:500])
+
+
+def _extract_primary_error(stderr_lines: List[str], fallback: str = "") -> str:
+    """Prefer explicit ERROR: lines over trailing hints or warnings."""
+    error_lines = [ln for ln in stderr_lines if "ERROR:" in ln]
+    if error_lines:
+        return "\n".join(error_lines[-3:])[:1500]
+    if stderr_lines:
+        return "\n".join(stderr_lines[-6:])[:1500]
+    return (fallback or "").strip()[:1500]
 
 
 def _format_duration(seconds: Optional[float]) -> str:
@@ -123,20 +172,21 @@ def _normalize_entry(entry: dict, fallback_url: str = "") -> Optional[dict]:
 def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[dict]:
     """
     Search YouTube using yt-dlp ytsearch or inspect a pasted URL.
-    Returns normalized list of song dicts. Sets last error on failure.
+    Returns normalized list of song dicts. Sets last error & diagnostics on completion.
     """
     clean_query = (query or "").strip()
     if not clean_query:
         _set_last_error("請輸入歌名、歌手或貼上網址")
+        _set_last_diagnostics([], "")
         return []
 
     is_url = bool(re.match(r"^https?://\S+", clean_query, re.IGNORECASE))
+    mode = "url" if is_url else "keyword"
     target = clean_query if is_url else f"ytsearch{max_results}:{clean_query}"
 
     cmd = [
         find_ytdlp(),
         "--dump-single-json",
-        "--no-warnings",
         "--no-check-certificate",
         "--add-header",
         "Accept-Language: zh-TW,zh;q=0.9,en;q=0.8",
@@ -148,7 +198,14 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
     cmd.extend(_ffmpeg_args())
     cmd.append(target)
 
-    logger.info("[SEARCH] %s", _cmd_str(cmd))
+    logger.info(
+        "[SEARCH] 開始 (mode=%s, timeout=%ss, target=%s) | cmd=%s",
+        mode,
+        timeout,
+        target,
+        _cmd_str(cmd),
+    )
+    started = time.perf_counter()
     try:
         result = subprocess.run(
             cmd,
@@ -160,20 +217,44 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
             creationflags=_create_no_window_flag(),
             env=_subprocess_env(),
         )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        stderr_raw = (result.stderr or "").strip()
+        stderr_lines, warnings = _split_stderr_lines(stderr_raw)
+        _set_last_diagnostics(warnings, stderr_raw[:4000])
+        _log_stderr_lines(stderr_lines, "[SEARCH]")
+
         if result.returncode != 0:
-            msg = (result.stderr or result.stdout or "").strip()[:500]
+            msg = _extract_primary_error(stderr_lines, fallback=(result.stdout or ""))
+            diag = analyze_error(msg)
             _set_last_error(msg or f"搜尋失敗 (code={result.returncode})")
-            logger.warning("[SEARCH] yt-dlp 失敗: %s", msg)
+            logger.error(
+                "[SEARCH] 失敗 (rc=%s, elapsed=%dms, err_code=%s, warnings=%d): %s",
+                result.returncode,
+                elapsed_ms,
+                diag.code,
+                len(warnings),
+                stderr_raw[:4000] or msg,
+            )
             return []
 
         raw = (result.stdout or "").strip()
         if not raw:
             _set_last_error("找不到符合的歌曲")
+            logger.warning("[SEARCH] 回傳空結果 (elapsed=%dms, query=%s)", elapsed_ms, clean_query)
             return []
 
         data = json.loads(raw)
         results: List[dict] = []
         if is_url and data.get("_type") != "playlist":
+            logger.info(
+                "[SEARCH] URL 解析結果: id=%s, title=%s, age_limit=%s, availability=%s, duration=%s, formats=%d",
+                data.get("id"),
+                data.get("title"),
+                data.get("age_limit"),
+                data.get("availability"),
+                data.get("duration"),
+                len(data.get("formats") or []),
+            )
             item = _normalize_entry(data, fallback_url=clean_query)
             if item:
                 results.append(item)
@@ -184,17 +265,28 @@ def search_youtube(query: str, max_results: int = 8, timeout: int = 30) -> List[
                     results.append(item)
 
         _set_last_error("" if results else "找不到符合的歌曲，請換個關鍵字試試")
-        logger.info("[SEARCH] 找到 %d 筆結果 (query=%s)", len(results), clean_query)
+        logger.info(
+            "[SEARCH] 完成: 找到 %d 筆結果 (mode=%s, elapsed=%dms, warnings=%d, query=%s)",
+            len(results),
+            mode,
+            elapsed_ms,
+            len(warnings),
+            clean_query,
+        )
         return results
     except subprocess.TimeoutExpired:
-        msg = "搜尋逾時，請檢查網路連線後再試一次"
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        msg = f"搜尋逾時 ({timeout}s)，請檢查網路連線後再試一次"
         _set_last_error(msg)
-        logger.warning("[SEARCH] 逾時: %s", clean_query)
+        _set_last_diagnostics([], msg)
+        logger.warning("[SEARCH] 逾時 (elapsed=%dms, target=%s)", elapsed_ms, clean_query)
         return []
     except Exception as e:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
         msg = str(e)
         _set_last_error(msg)
-        logger.error("[SEARCH] 例外: %s", e)
+        _set_last_diagnostics([], msg)
+        logger.error("[SEARCH] 例外 (elapsed=%dms): %s", elapsed_ms, e, exc_info=True)
         return []
 
 
@@ -204,8 +296,7 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
         find_ytdlp(),
         "--dump-json",
         "--no-playlist",
-        "--no-warnings",
-        "--quiet",
+        "--no-progress",
         "--no-check-certificate",
     ]
     cmd.extend(_ffmpeg_args())
@@ -214,6 +305,7 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
     cmd.append(url)
 
     logger.info("[INFO] %s", _cmd_str(cmd))
+    started = time.perf_counter()
     try:
         result = subprocess.run(
             cmd,
@@ -225,22 +317,53 @@ def extract_info(url: str, extra_args: List[str] = None, timeout: int = 30) -> O
             creationflags=_create_no_window_flag(),
             env=_subprocess_env(),
         )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        stderr_raw = (result.stderr or "").strip()
+        stderr_lines, warnings = _split_stderr_lines(stderr_raw)
+        _set_last_diagnostics(warnings, stderr_raw[:4000])
+        _log_stderr_lines(stderr_lines, "[INFO]")
+
         if result.returncode != 0:
-            msg = (result.stderr or "").strip()[:500]
-            _set_last_error(msg)
-            logger.warning("yt-dlp extract_info 失敗: %s", msg)
+            msg = _extract_primary_error(stderr_lines, fallback=(result.stdout or ""))
+            diag = analyze_error(msg)
+            _set_last_error(msg or f"extract_info failed (code={result.returncode})")
+            logger.warning(
+                "[INFO] 失敗 (rc=%s, elapsed=%dms, err_code=%s, warnings=%d): %s",
+                result.returncode,
+                elapsed_ms,
+                diag.code,
+                len(warnings),
+                stderr_raw[:4000] or msg,
+            )
             return None
+
         _set_last_error("")
-        return json.loads(result.stdout) if (result.stdout or "").strip() else None
+        parsed = json.loads(result.stdout) if (result.stdout or "").strip() else None
+        if isinstance(parsed, dict):
+            logger.info(
+                "[INFO] 成功 (elapsed=%dms, warnings=%d): id=%s, title=%s, age_limit=%s, availability=%s, formats=%d",
+                elapsed_ms,
+                len(warnings),
+                parsed.get("id"),
+                parsed.get("title"),
+                parsed.get("age_limit"),
+                parsed.get("availability"),
+                len(parsed.get("formats") or []),
+            )
+        return parsed
     except subprocess.TimeoutExpired:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
         msg = f"連線逾時 ({timeout}s)"
         _set_last_error(msg)
-        logger.warning("%s for %s", msg, url)
+        _set_last_diagnostics([], msg)
+        logger.warning("[INFO] %s for %s (elapsed=%dms)", msg, url, elapsed_ms)
         return None
     except Exception as e:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
         msg = str(e)
         _set_last_error(msg)
-        logger.warning("yt-dlp extract_info 錯誤: %s", e)
+        _set_last_diagnostics([], msg)
+        logger.warning("[INFO] 錯誤 (elapsed=%dms): %s", elapsed_ms, e, exc_info=True)
         return None
 
 
@@ -274,6 +397,21 @@ _PROGRESS_RE = re.compile(
 )
 
 _DEST_RE = re.compile(r"\[(?:ExtractAudio|download)\]\s+Destination:\s+(.+)$")
+
+_LIFECYCLE_MARKERS = (
+    "[youtube]",
+    "[youtube:tab]",
+    "[info]",
+    "[download] Destination:",
+    "[download] 100%",
+    "[ExtractAudio]",
+    "[Metadata]",
+    "[EmbedThumbnail]",
+    "[Fixup",
+    "Extracting cookies",
+    "WARNING:",
+    "ERROR:",
+)
 
 _SIZE_UNITS = {
     "B": 1,
@@ -328,11 +466,11 @@ def download(
     extra_args: List[str] = None,
     progress_callback: Callable = None,
 ) -> int:
-    """Download audio using yt-dlp subprocess with UTF-8 output parsing."""
+    """Download audio using yt-dlp subprocess with UTF-8 output parsing and rich logging."""
+    ytdlp_exe = find_ytdlp()
     cmd = [
-        find_ytdlp(),
+        ytdlp_exe,
         "--newline",
-        "--no-warnings",
         "--no-check-certificate",
         "-o",
         output_path,
@@ -344,11 +482,20 @@ def download(
         cmd.extend(extra_args)
     cmd.append(url)
 
-    logger.info("[CMD] %s", _cmd_str(cmd))
+    logger.info(
+        "[CMD] ytdlp=%s | format=%s | output=%s | cmd=%s",
+        ytdlp_exe,
+        format_spec,
+        output_path,
+        _cmd_str(cmd),
+    )
+    started = time.perf_counter()
     flags = _create_no_window_flag()
     stderr_lines: List[str] = []
+    warning_lines: List[str] = []
     last_error_line = ""
     detected_filepath = ""
+    logged_milestones = set()
 
     try:
         proc = subprocess.Popen(
@@ -365,8 +512,16 @@ def download(
                 if not line:
                     continue
                 stderr_lines.append(line)
+                if "WARNING:" in line:
+                    warning_lines.append(line)
+                    logger.warning("[CMD_WARN] %s", line[:500])
+                elif "ERROR:" in line:
+                    logger.error("[CMD_STDERR] %s", line[:500])
+                else:
+                    logger.debug("[CMD_STDERR] %s", line[:500])
+
                 total = sum(len(l) for l in stderr_lines)
-                while total > 2000 and len(stderr_lines) > 1:
+                while (total > 8000 or len(stderr_lines) > 40) and len(stderr_lines) > 1:
                     total -= len(stderr_lines.pop(0))
 
         stderr_thread = threading.Thread(target=_collect_stderr, daemon=True)
@@ -378,8 +533,13 @@ def download(
                 continue
 
             if "ERROR:" in line:
-                logger.error("yt-dlp: %s", line[:400])
+                logger.error("yt-dlp: %s", line[:500])
                 last_error_line = line
+            elif "WARNING:" in line:
+                warning_lines.append(line)
+                logger.warning("yt-dlp: %s", line[:500])
+            elif any(marker in line for marker in _LIFECYCLE_MARKERS):
+                logger.info("[YTDLP] %s", line[:400])
 
             dest_match = _DEST_RE.search(line)
             if dest_match:
@@ -396,8 +556,19 @@ def download(
                 continue
 
             progress = _parse_progress(line)
-            if progress and progress_callback:
-                progress_callback(progress)
+            if progress:
+                pct = progress["percent"]
+                for milestone in (25, 50, 75):
+                    if pct >= milestone and milestone not in logged_milestones:
+                        logged_milestones.add(milestone)
+                        logger.debug(
+                            "[YTDLP_PROGRESS] %d%% (speed=%s, eta=%s)",
+                            milestone,
+                            progress.get("speed", ""),
+                            progress.get("eta", ""),
+                        )
+                if progress_callback:
+                    progress_callback(progress)
 
         proc.wait()
         stderr_thread.join(timeout=2.0)
@@ -406,26 +577,55 @@ def download(
         except Exception:
             pass
 
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        full_stderr = "\n".join(stderr_lines)
+        _set_last_diagnostics(warning_lines, full_stderr[:8000])
+
         if proc.returncode == 0:
             _set_last_error("")
+            file_size = 0
+            if detected_filepath:
+                try:
+                    p = Path(detected_filepath)
+                    if p.exists():
+                        file_size = p.stat().st_size
+                except Exception:
+                    pass
+            logger.info(
+                "[CMD_OK] 下載與轉檔完成 (elapsed=%dms, warnings=%d, file=%s, size=%s bytes)",
+                elapsed_ms,
+                len(warning_lines),
+                detected_filepath or "(unknown)",
+                file_size,
+            )
             if progress_callback:
                 done_payload = {"percent": 100.0, "stage": "completed"}
                 if detected_filepath:
                     done_payload["filepath"] = detected_filepath
                 progress_callback(done_payload)
         else:
-            reason = "\n".join(stderr_lines[-5:]).strip() or last_error_line.strip()
+            reason = _extract_primary_error(stderr_lines, fallback=last_error_line)
             if not reason:
                 reason = f"yt-dlp exited with code {proc.returncode}"
-            logger.error("[CMD_ERR] %s", reason)
+            diag = analyze_error(reason)
+            logger.error(
+                "[CMD_ERR] rc=%s | elapsed=%dms | warnings=%d | err_code=%s | reason=%s",
+                proc.returncode,
+                elapsed_ms,
+                len(warning_lines),
+                diag.code,
+                reason,
+            )
             _set_last_error(reason)
             if progress_callback:
                 progress_callback({"percent": 0, "stage": "failed"})
 
         return proc.returncode
     except Exception as e:
-        logger.error("yt-dlp download failed: %s", e)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.error("[CMD_EXC] yt-dlp download failed (elapsed=%dms): %s", elapsed_ms, e, exc_info=True)
         _set_last_error(str(e) or f"yt-dlp download failed: {e}")
+        _set_last_diagnostics(warning_lines, str(e))
         if progress_callback:
             progress_callback({"error": str(e), "stage": "failed"})
         return -1

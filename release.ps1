@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Bump version, commit, tag and push to trigger GitHub release
 .DESCRIPTION
@@ -61,5 +61,5 @@ git -C $root push origin $tag
 Write-Host " done" -ForegroundColor Green
 
 Write-Host "`nRelease $tag created!" -ForegroundColor Green
-Write-Host "  CI is building on: https://github.com/vokrob/yt-dlp-gui/actions" -ForegroundColor Cyan
-Write-Host "  Release will appear at: https://github.com/vokrob/yt-dlp-gui/releases`n" -ForegroundColor Cyan
+Write-Host "  CI is building on: https://github.com/DreamOver9183/EzMusicDL/actions" -ForegroundColor Cyan
+Write-Host "  Release will appear at: https://github.com/DreamOver9183/EzMusicDL/releases`n" -ForegroundColor Cyan

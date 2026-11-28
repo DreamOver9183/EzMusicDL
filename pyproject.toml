@@ -3,9 +3,9 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yt-dlp-gui"
+name = "easymusicdl"
 version = "2026.11.21"
-description = "Desktop GUI for yt-dlp"
+description = "Desktop GUI for downloading music as MP3 (powered by yt-dlp)"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
@@ -25,11 +25,11 @@ dev = [
 ]
 
 [project.scripts]
-yt-dlp-gui = "ytdlp_gui.main:main"
+easymusicdl = "ytdlp_gui.main:main"
 
 [project.urls]
-Homepage = "https://github.com/vokrob/yt-dlp-gui"
-Repository = "https://github.com/vokrob/yt-dlp-gui"
+Homepage = "https://github.com/DreamOver9183/EzMusicDL"
+Repository = "https://github.com/DreamOver9183/EzMusicDL"
 
 [tool.setuptools.packages.find]
 where = ["src"]

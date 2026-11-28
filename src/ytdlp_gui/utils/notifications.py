@@ -11,7 +11,7 @@ import customtkinter as ctk
 
 from ytdlp_gui.gui.icons import get_icon
 from ytdlp_gui.gui.theme import COLORS, RADIUS, font
-from ytdlp_gui.utils.error_translations import translate_error
+from ytdlp_gui.utils.error_translations import analyze_error
 
 
 class NotificationType(Enum):
@@ -86,13 +86,13 @@ class ToastNotification(ctk.CTkToplevel):
 
     def setup_window(self):
         self.title("")
-        self.geometry("400x104")
+        self.geometry("420x124")
         self.resizable(False, False)
         self.overrideredirect(True)
         self.update_idletasks()
         screen_width = self.winfo_screenwidth()
-        x = max(20, screen_width - 424)
-        self.geometry(f"400x104+{x}+24")
+        x = max(20, screen_width - 444)
+        self.geometry(f"420x124+{x}+24")
         self.attributes("-topmost", True)
 
     def setup_ui(self, title: str, message: str):
@@ -136,7 +136,7 @@ class ToastNotification(ctk.CTkToplevel):
             text_color=COLORS["text_secondary"],
             anchor="w",
             justify="left",
-            wraplength=280,
+            wraplength=310,
         ).grid(row=1, column=1, sticky="ew", pady=(2, 0))
 
         ctk.CTkButton(
@@ -171,10 +171,24 @@ class ErrorHandler:
         self.notification_manager = notification_manager
 
     def handle_download_error(self, error: Exception, url: str = "", show_user: bool = True):
-        user_msg = translate_error(error)
-        self.logger.error("下載失敗 (%s): %s", url, error)
+        info = analyze_error(error)
+        self.logger.error(
+            "[ERR:%s] (%s) %s | url=%s | raw=%s",
+            info.code,
+            info.category,
+            info.title,
+            url,
+            error,
+        )
         if show_user:
-            self.notification_manager.show_error("下載未完成", user_msg, show_toast=True)
+            toast_body = info.suggestion or info.detail
+            if len(toast_body) > 95:
+                toast_body = toast_body[:93] + "..."
+            self.notification_manager.show_error(
+                f"下載未完成 · {info.title}",
+                toast_body,
+                show_toast=True,
+            )
 
     def handle_unexpected_error(self, error: Exception, context: str = ""):
         user_msg = "發生未預期的狀況，請再試一次，或點右上角「設定與修復」複製診斷紀錄。"

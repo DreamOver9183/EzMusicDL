@@ -2,20 +2,39 @@
 # -*- coding: utf-8 -*-
 """
 Build Script for 音樂下載工具 (EasyMusicDL) - Portable --onedir Windows package.
+Supports --zip to produce EasyMusicDL-v<version>-win64-portable.zip and .sha256.
 """
 
+import argparse
+import hashlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Tuple
+import zipfile
 
 APP_NAME = "EasyMusicDL"
-APP_VERSION = "2026.11.24"
-
 BUILD_DIR = Path("build")
 DIST_DIR = Path("dist")
 ASSETS_DIR = Path("assets")
+EXCLUDED_BIN_FILES = frozenset({"yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe"})
+
+
+def read_app_version() -> str:
+    """Read single-source version string from src/ytdlp_gui/__init__.py."""
+    init_file = Path("src") / "ytdlp_gui" / "__init__.py"
+    if init_file.exists():
+        content = init_file.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+        if m:
+            return m.group(1).strip()
+    return "0.0.0"
+
+
+APP_VERSION = read_app_version()
 
 
 def clean_build():
@@ -227,14 +246,54 @@ def write_portable_helpers(package_dir: Path) -> None:
         "2. 下載歌曲\n"
         "   - 輸入歌名或貼上 YouTube 網址，按「搜尋」。\n"
         "   - 點擊歌曲右側「下載 MP3」，完成後自動存至系統「下載 (Downloads)」資料夾。\n\n"
-        "3. 設定與修復\n"
-        "   - 若遇到無法下載，可點右上角「設定與修復」執行「檢查並更新下載引擎」，\n"
-        "     或點「複製診斷紀錄」將 logs\\latest.log 傳給家人協助排查。\n"
+        "3. 應用程式更新與設定修復\n"
+        "   - 程式會自動檢查免安裝版更新，也可點右上角「設定與修復 → 檢查應用程式更新」\n"
+        "     直接下載並更新；更新過程會保留 bin / data / logs 與已下載音樂。\n"
+        "   - 若遇到無法下載，可於「設定與修復」執行「檢查並更新下載引擎」，\n"
+        "     或點「複製診斷紀錄」協助排查。\n"
     )
     (package_dir / "使用說明.txt").write_text(readme_txt, encoding="utf-8")
 
 
+def create_portable_zip(package_dir: Path, version: str, out_dir: Path = DIST_DIR) -> Tuple[Path, Path]:
+    """Package portable --onedir folder into a release zip and matching .sha256 file."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    zip_name = f"{APP_NAME}-v{version}-win64-portable.zip"
+    zip_path = out_dir / zip_name
+    sha_path = out_dir / f"{zip_name}.sha256"
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for empty_sub in ("bin", "data", "logs"):
+            info = zipfile.ZipInfo(f"{APP_NAME}/{empty_sub}/")
+            zf.writestr(info, b"")
+
+        for item in sorted(package_dir.rglob("*")):
+            rel = item.relative_to(package_dir)
+            top = rel.parts[0]
+            if top in ("data", "logs", ".update_backup") or item.name == "cookies.txt":
+                continue
+            if top == "bin" and item.name.lower() in EXCLUDED_BIN_FILES:
+                continue
+            if item.is_dir():
+                if top == "bin":
+                    continue
+                continue
+            zf.write(item, arcname=str(Path(APP_NAME) / rel))
+
+    digest = hashlib.sha256()
+    with open(zip_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    sha_hex = digest.hexdigest().lower()
+    sha_path.write_text(f"{sha_hex}  {zip_name}\n", encoding="utf-8")
+    return zip_path, sha_path
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Build EasyMusicDL portable Windows package")
+    parser.add_argument("--zip", action="store_true", help="Also create portable .zip and .sha256")
+    args = parser.parse_args()
+
     print(f"Building {APP_NAME} v{APP_VERSION}")
     print("=" * 50)
     print(f"Platform: {platform.system()} {platform.release()} ({platform.machine()})")
@@ -257,6 +316,11 @@ def main():
     print("\nBuild completed successfully!")
     print(f"Portable folder: {package_dir.resolve()}")
     print(f"Executable:      {(package_dir / (APP_NAME + '.exe')).resolve()}")
+
+    if args.zip:
+        zip_path, sha_path = create_portable_zip(package_dir, APP_VERSION, DIST_DIR)
+        print(f"Portable ZIP:    {zip_path.resolve()}")
+        print(f"SHA-256 file:    {sha_path.resolve()}")
 
 
 if __name__ == "__main__":

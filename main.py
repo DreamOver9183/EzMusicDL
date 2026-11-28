@@ -36,8 +36,8 @@ setup_paths()
 
 try:
     from ytdlp_gui.gui.main_window import YTDLPGUIApp
-    from ytdlp_gui.main import run_startup_bootstrap_ui
-    from ytdlp_gui.utils.logger import flush_logs, get_log_manager
+    from ytdlp_gui.main import run_self_update_test, run_startup_bootstrap_ui
+    from ytdlp_gui.utils.logger import flush_logs, get_log_manager, log_startup_environment
     from ytdlp_gui.utils.paths import get_logs_dir
 except ImportError as e:
     print(f"Import error: {e}")
@@ -70,10 +70,15 @@ def watchdog():
 
 def main():
     """Start the application with automatic 3-stage environment check -> download -> verify."""
+    if "--self-update-test" in sys.argv:
+        sys.exit(run_self_update_test())
     try:
         get_log_manager()
+        log_startup_environment()
         report = run_startup_bootstrap_ui()
         if not report or not report.ok:
+            logging.warning("啟動環境檢查未通過或被使用者取消，結束程式")
+            flush_logs()
             sys.exit(1)
 
         global STARTUP_COMPLETE

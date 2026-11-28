@@ -18,7 +18,7 @@ from ytdlp_gui.core import ytdlp_wrapper
 from ytdlp_gui.core.download_manager import DownloadStatus
 from ytdlp_gui.gui.icons import get_icon, get_placeholder_thumb
 from ytdlp_gui.gui.theme import COLORS, RADIUS, font
-from ytdlp_gui.utils.error_translations import translate_error
+from ytdlp_gui.utils.error_translations import TranslatedError, analyze_error
 
 _YT_URL_RE = re.compile(
     r"^https?://(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)/\S+",
@@ -296,6 +296,7 @@ class MusicSearchView(ctk.CTkFrame):
         if not query or self._searching:
             return
 
+        self.logger.info("[UI_SEARCH] 使用者發起搜尋: %s", query)
         self._searching = True
         self.search_btn.configure(state="disabled", text="搜尋中")
         self.results_heading.configure(text=f"正在搜尋「{query}」...")
@@ -315,6 +316,16 @@ class MusicSearchView(ctk.CTkFrame):
     def _search_worker(self, query: str):
         results = ytdlp_wrapper.search_youtube(query, max_results=8, timeout=30)
         err = ytdlp_wrapper.get_last_error() if not results else ""
+        if not results:
+            diag = analyze_error(err)
+            self.logger.warning(
+                "[UI_SEARCH] 搜尋失敗 (query=%s, code=%s): %s",
+                query,
+                diag.code,
+                err or "empty result",
+            )
+        else:
+            self.logger.info("[UI_SEARCH] 搜尋成功: %d 筆結果 (query=%s)", len(results), query)
         self.after(0, lambda: self._on_search_finished(query, results, err))
 
     def _on_search_finished(self, query: str, results: List[dict], err: str):
@@ -324,7 +335,16 @@ class MusicSearchView(ctk.CTkFrame):
         self._clear_results_container()
 
         if not results:
-            friendly = translate_error(Exception(err)) if err else "找不到符合的歌曲，請嘗試其他關鍵字。"
+            if err:
+                diag = analyze_error(err)
+            else:
+                diag = TranslatedError(
+                    code="NO_RESULTS",
+                    category="youtube",
+                    title="找不到符合的歌曲",
+                    detail="找不到與輸入內容相符的歌曲或影片。",
+                    suggestion="請嘗試更換歌名、歌手關鍵字，或直接貼上完整的 YouTube 影片網址。",
+                )
             self.results_heading.configure(text="搜尋結果（0 筆）")
             err_box = ctk.CTkFrame(
                 self.results_scroll,
@@ -336,14 +356,33 @@ class MusicSearchView(ctk.CTkFrame):
             err_box.grid(row=0, column=0, sticky="ew", pady=8)
             ctk.CTkLabel(
                 err_box,
-                text=f"  {friendly}",
+                text=f"  {diag.title}",
                 image=get_icon("warning", size=20, variant="danger"),
                 compound="left",
                 font=font(16, bold=True),
                 text_color=COLORS["danger"],
-                wraplength=760,
+                wraplength=740,
+                anchor="w",
                 justify="left",
-            ).pack(padx=20, pady=20, anchor="w")
+            ).pack(padx=20, pady=(16, 6), anchor="w")
+            ctk.CTkLabel(
+                err_box,
+                text=diag.full_message(),
+                font=font(14),
+                text_color=COLORS["text_primary"],
+                wraplength=760,
+                anchor="w",
+                justify="left",
+            ).pack(padx=20, pady=(0, 8), anchor="w")
+            ctk.CTkLabel(
+                err_box,
+                text=f"錯誤代碼：{diag.code}（可至右上角「設定與修復 → 複製診斷紀錄」協助排查）",
+                font=font(12),
+                text_color=COLORS["text_secondary"],
+                wraplength=760,
+                anchor="w",
+                justify="left",
+            ).pack(padx=20, pady=(0, 16), anchor="w")
             return
 
         self.results_heading.configure(text=f"搜尋結果（共 {len(results)} 筆）")
@@ -567,7 +606,7 @@ class MusicSearchView(ctk.CTkFrame):
         elif item.status == DownloadStatus.FAILED:
             progress_bar.pack_forget()
             open_btn.pack_forget()
-            msg = item.error_message or "下載失敗，請再試一次"
+            msg = getattr(item, "error_title", "") or item.error_message or "下載失敗，請再試一次"
             if len(msg) > 48:
                 msg = msg[:46] + "..."
             status_label.configure(

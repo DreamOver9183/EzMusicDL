@@ -10,6 +10,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -85,9 +86,21 @@ def get_ffmpeg_location() -> Optional[str]:
 
 def _download_file(url: str, dest: Path, timeout: int = 90) -> None:
     """Download a file with a per-request timeout. Raises on failure."""
+    started = time.perf_counter()
+    logger.info("[BIN_DL] 開始下載: url=%s -> %s", url, dest)
     req = urllib.request.Request(url, headers={"User-Agent": "EasyMusicDL/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+        status = getattr(resp, "status", None)
         shutil.copyfileobj(resp, f)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    size = dest.stat().st_size if dest.exists() else 0
+    logger.info(
+        "[BIN_DL] 下載完成: url=%s | status=%s | size=%s bytes | elapsed=%dms",
+        url,
+        status,
+        size,
+        elapsed_ms,
+    )
 
 
 def _suppress_windows_loader_dialogs() -> None:
@@ -245,7 +258,7 @@ def _download_and_extract_ffmpeg(bin_dir: Path, report_fn: Callable[[str, int], 
             report_fn("FFmpeg 下載完成", 72)
             return True
         except Exception as e:
-            logger.warning("從 %s 下載 FFmpeg 失敗: %s", source, e)
+            logger.warning("從 %s 下載 FFmpeg 失敗: %s", source, e, exc_info=True)
             zip_path.unlink(missing_ok=True)
             for path in created:
                 path.unlink(missing_ok=True)
@@ -272,7 +285,7 @@ def _download_and_extract_deno(bin_dir: Path, report_fn: Callable[[str, int], No
             report_fn("Deno 輔助元件準備完成", 78)
             return True
     except Exception as e:
-        logger.warning("Deno 下載失敗（不影響基本功能）: %s", e)
+        logger.warning("Deno 下載失敗（不影響基本功能）: %s", e, exc_info=True)
         zip_path.unlink(missing_ok=True)
         deno_path.unlink(missing_ok=True)
     return False
@@ -289,6 +302,7 @@ def run_environment_bootstrap(
     2) Download / update missing or outdated components
     3) Re-verify all binaries and writable folders from disk
     """
+    bootstrap_started = time.perf_counter()
     report = BootstrapReport()
     bin_dir = prepend_bin_to_path()
     data_dir = get_data_dir()
@@ -373,7 +387,7 @@ def run_environment_bootstrap(
                     except Exception as pe:
                         logger.warning("儲存待更新 yt-dlp 失敗: %s", pe)
                 except Exception as e:
-                    logger.warning("下載 yt-dlp (%s) 失敗: %s", src_name, e)
+                    logger.warning("下載 yt-dlp (%s) 失敗: %s", src_name, e, exc_info=True)
             if not updated_ok and cur_ytdlp_ver is not None:
                 emit(2, s2, "更新下載失敗，保留現有可用的 yt-dlp 版本繼續", 45)
         else:
@@ -454,6 +468,30 @@ def run_environment_bootstrap(
             100,
         )
 
+    elapsed_ms = int((time.perf_counter() - bootstrap_started) * 1000)
+    sizes = {
+        name: ((bin_dir / name).stat().st_size if (bin_dir / name).exists() else 0)
+        for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe")
+    }
+    logger.info(
+        "[BOOTSTRAP] 摘要: ok=%s | elapsed=%dms | ytdlp=%s (latest=%s, updated=%s, size=%sB) | "
+        "ffmpeg=%s (ffprobe=%s, size=%sB/%sB) | deno=%s (size=%sB) | writable=(data=%s, logs=%s, dl=%s)",
+        report.ok,
+        elapsed_ms,
+        report.ytdlp_version or "none",
+        report.ytdlp_latest or "offline",
+        report.ytdlp_updated,
+        sizes["yt-dlp.exe"],
+        report.ffmpeg_version or "none",
+        report.ffprobe_ok,
+        sizes["ffmpeg.exe"],
+        sizes["ffprobe.exe"],
+        report.deno_version or "none",
+        sizes["deno.exe"],
+        report.data_writable,
+        report.logs_writable,
+        report.downloads_writable,
+    )
     return report
 
 

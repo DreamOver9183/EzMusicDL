@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Download Manager - Pure MP3 queue manager with portable persistence.
+Download Manager - Pure MP3 queue manager with portable persistence,
+smart fallback error preservation, and detailed diagnostics logging.
 """
 
 import json
@@ -13,11 +14,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from ytdlp_gui.utils.error_translations import translate_error
+from ytdlp_gui.utils.error_translations import analyze_error, is_local_cookie_error
 from ytdlp_gui.utils.logger import flush_logs
 
 from . import ytdlp_wrapper
 from .cookie_manager import CookieManager, cookie_opts_to_cli
+
+_RETRY_KEYWORDS = (
+    "sign in",
+    "confirm you",
+    "not a bot",
+    "bot",
+    "cookie",
+    "403",
+    "forbidden",
+    "dpapi",
+    "failed to decrypt",
+)
 
 
 class DownloadStatus(Enum):
@@ -45,6 +58,8 @@ class DownloadItem:
     total_bytes: int = 0
     saved_filepath: str = ""
     error_message: str = ""
+    error_code: str = ""
+    error_title: str = ""
     created_at: float = field(default_factory=time.time)
     completed_at: Optional[float] = None
 
@@ -117,7 +132,13 @@ class DownloadManager:
         with self.queue_lock:
             self.download_queue.append(download_item)
 
-        self.logger.info("加入下載佇列: %s (%s)", download_item.title, download_item.id)
+        self.logger.info(
+            "加入下載佇列: %s (id=%s, url=%s, out=%s)",
+            download_item.title,
+            download_item.id[:8],
+            url,
+            resolved_output,
+        )
         self.log_download_event("ADDED", url, download_item.title)
 
         self.save_queue()
@@ -151,26 +172,51 @@ class DownloadManager:
         self.save_queue()
 
     def _get_video_info(self, download_item: DownloadItem):
-        """Fetch title without downloading; try no-cookie first."""
+        """Fetch title without downloading; try no-cookie first, skipping unavailable browsers."""
         try:
             base_args = [
                 "--add-header",
                 "Accept-Language: zh-TW,zh;q=0.9,en;q=0.8",
             ]
             info = None
-            for browser in [None, "firefox", "edge", "chrome"]:
+            browsers = [None, "firefox", "edge", "chrome"]
+            for idx, browser in enumerate(browsers, 1):
                 extra = list(base_args)
                 if browser is None:
                     self.cookie_manager.add_cookie_file_args(extra)
+                    strategy = "無瀏覽器 Cookie / cookies.txt"
                 else:
                     cookie_opts = self.cookie_manager.get_cookie_options(
                         download_item.url, browser=browser
                     )
-                    if cookie_opts:
-                        extra.extend(cookie_opts_to_cli(cookie_opts))
+                    if not cookie_opts:
+                        self.logger.debug(
+                            "[INFO_FETCH] 略過不可用/未啟用的瀏覽器: %s",
+                            browser,
+                        )
+                        continue
+                    extra.extend(cookie_opts_to_cli(cookie_opts))
+                    strategy = f"browser={browser}"
+
+                self.logger.info(
+                    "[INFO_FETCH] 嘗試 %d/%d (%s) url=%s",
+                    idx,
+                    len(browsers),
+                    strategy,
+                    download_item.url,
+                )
                 info = ytdlp_wrapper.extract_info(download_item.url, extra_args=extra)
                 if info:
                     break
+                raw_err = ytdlp_wrapper.get_last_error()
+                if raw_err:
+                    diag = analyze_error(raw_err)
+                    self.logger.warning(
+                        "[INFO_FETCH] 失敗 (%s, code=%s): %s",
+                        strategy,
+                        diag.code,
+                        raw_err,
+                    )
 
             if info:
                 download_item.title = info.get("title") or "未命名歌曲"
@@ -195,30 +241,64 @@ class DownloadManager:
         try:
             download_item.status = DownloadStatus.DOWNLOADING
             download_item.stage = "downloading"
+            download_item.error_code = ""
+            download_item.error_title = ""
+            download_item.error_message = ""
             thread = threading.Thread(
                 target=self._download_worker, args=(download_item,), daemon=True
             )
             self.active_downloads[download_item.id] = thread
             thread.start()
-            self.logger.info("開始下載 MP3: %s", download_item.title)
+            self.logger.info("開始下載 MP3: %s (id=%s)", download_item.title, download_item.id[:8])
             self._notify_progress_change(download_item.id)
         except Exception as e:
-            self.logger.error("無法啟動下載: %s", e)
+            diag = analyze_error(e)
+            self.logger.error("無法啟動下載 (%s): %s", diag.code, e, exc_info=True)
             download_item.status = DownloadStatus.FAILED
             download_item.stage = "failed"
-            download_item.error_message = translate_error(e)
+            download_item.error_code = diag.code
+            download_item.error_title = diag.title
+            download_item.error_message = diag.full_message()
             self._notify_progress_change(download_item.id)
 
     def _download_worker(self, download_item: DownloadItem):
-        """Try public download first (None), then fall back to browser cookies only on auth/403."""
+        """Try public download first (None), then fall back to available browser cookies on auth/403."""
+        short_id = download_item.id[:8]
         cookie_browsers = [None, "firefox", "edge", "chrome"]
-        last_error = None
+        primary_error: Optional[Exception] = None
+        last_error: Optional[Exception] = None
+        attempt_logs: List[str] = []
         success = False
 
-        for browser in cookie_browsers:
+        for idx, browser in enumerate(cookie_browsers, 1):
+            strategy = "無瀏覽器 Cookie / cookies.txt" if browser is None else f"browser={browser}"
+            if browser is not None:
+                cookie_opts = self.cookie_manager.get_cookie_options(
+                    download_item.url, browser=browser
+                )
+                if not cookie_opts:
+                    msg = f"略過 {browser}（未安裝或未啟用 Cookie）"
+                    attempt_logs.append(f"{idx}. {strategy}: skipped")
+                    self.logger.info("[DL %s] %s", short_id, msg)
+                    continue
+            else:
+                cookie_opts = None
+
+            self.logger.info(
+                "[DL %s] 嘗試 %d/%d（策略: %s）url=%s",
+                short_id,
+                idx,
+                len(cookie_browsers),
+                strategy,
+                download_item.url,
+            )
+            attempt_started = time.perf_counter()
             try:
                 extra_args, format_spec, output_template = self._prepare_ydl_options(
-                    download_item, browser=browser, use_cookies=browser is not None
+                    download_item,
+                    browser=browser,
+                    use_cookies=browser is not None,
+                    cookie_opts=cookie_opts,
                 )
 
                 def progress_callback(p):
@@ -233,15 +313,39 @@ class DownloadManager:
                 )
 
                 if exit_code == 0:
+                    elapsed_ms = int((time.perf_counter() - attempt_started) * 1000)
                     download_item.status = DownloadStatus.COMPLETED
                     download_item.stage = "completed"
                     download_item.completed_at = time.time()
                     download_item.progress = 100.0
                     download_item.speed = ""
                     download_item.eta = ""
+                    download_item.error_code = ""
+                    download_item.error_title = ""
+                    download_item.error_message = ""
 
-                    self.logger.info("下載完成 (MP3): %s", download_item.title)
-                    self.log_download_event("COMPLETED", download_item.url, download_item.title)
+                    saved_size = 0
+                    if download_item.saved_filepath:
+                        try:
+                            p = Path(download_item.saved_filepath)
+                            if p.exists():
+                                saved_size = p.stat().st_size
+                        except Exception:
+                            pass
+
+                    self.logger.info(
+                        "[DL %s] 下載完成 (策略=%s, elapsed=%dms, file=%s, size=%s bytes)",
+                        short_id,
+                        strategy,
+                        elapsed_ms,
+                        download_item.saved_filepath or "(unknown)",
+                        saved_size,
+                    )
+                    self.log_download_event(
+                        "COMPLETED",
+                        download_item.url,
+                        f"{download_item.title} | strategy={strategy} | size={saved_size}B",
+                    )
 
                     if self.notification_manager:
                         self.notification_manager.show_success(
@@ -251,42 +355,83 @@ class DownloadManager:
 
                     success = True
                     break
-                else:
-                    real_error = ytdlp_wrapper.get_last_error()
-                    raise Exception(real_error or f"yt-dlp exited with code {exit_code}")
+
+                real_error = ytdlp_wrapper.get_last_error()
+                raise Exception(real_error or f"yt-dlp exited with code {exit_code}")
 
             except Exception as e:
+                elapsed_ms = int((time.perf_counter() - attempt_started) * 1000)
+                if primary_error is None:
+                    primary_error = e
                 last_error = e
+                diag = analyze_error(e)
                 error_msg = str(e).lower()
-                self.logger.warning("嘗試下載失敗 (%s): %s", browser or "無 Cookie", e)
+                matched_kw = [kw for kw in _RETRY_KEYWORDS if kw in error_msg]
+                attempt_logs.append(
+                    f"{idx}. {strategy} -> {diag.code} ({elapsed_ms}ms): {diag.raw_excerpt}"
+                )
 
-                if any(
-                    kw in error_msg
-                    for kw in [
-                        "sign in",
-                        "confirm you",
-                        "bot",
-                        "cookie",
-                        "403",
-                        "forbidden",
-                        "dpapi",
-                        "failed to decrypt",
-                    ]
-                ):
-                    if browser != cookie_browsers[-1]:
-                        continue
+                self.logger.warning(
+                    "[DL %s] 嘗試失敗 (策略=%s, elapsed=%dms, err_code=%s, category=%s, title=%s, retry_kw=%s): %s",
+                    short_id,
+                    strategy,
+                    elapsed_ms,
+                    diag.code,
+                    diag.category,
+                    diag.title,
+                    matched_kw or "none",
+                    e,
+                )
+
+                if matched_kw and idx < len(cookie_browsers):
+                    continue
+                self.logger.info(
+                    "[DL %s] 停止重試 (err_code=%s, matched_kw=%s)",
+                    short_id,
+                    diag.code,
+                    matched_kw or "none",
+                )
                 break
 
         if not success:
-            self.logger.error("MP3 下載失敗: %s", last_error)
+            effective_error = last_error
+            if (
+                primary_error is not None
+                and last_error is not None
+                and primary_error is not last_error
+                and is_local_cookie_error(last_error)
+            ):
+                effective_error = primary_error
+                self.logger.info(
+                    "[DL %s] 保留原始錯誤供使用者診斷（避免被本機 Cookie 存取失敗覆蓋）: primary=%s | last=%s",
+                    short_id,
+                    analyze_error(primary_error).code,
+                    analyze_error(last_error).code,
+                )
+
+            final_diag = analyze_error(effective_error)
             download_item.status = DownloadStatus.FAILED
             download_item.stage = "failed"
-            download_item.error_message = translate_error(last_error)
-            self.log_download_event("FAILED", download_item.url, str(last_error))
+            download_item.error_code = final_diag.code
+            download_item.error_title = final_diag.title
+            download_item.error_message = final_diag.full_message()
+
+            self.logger.error(
+                "[DL %s] MP3 下載最終失敗 | code=%s | title=%s | attempts=%s",
+                short_id,
+                final_diag.code,
+                final_diag.title,
+                " ; ".join(attempt_logs),
+            )
+            self.log_download_event(
+                "FAILED",
+                download_item.url,
+                f"[{final_diag.code}] {final_diag.title} | raw={final_diag.raw_excerpt}",
+            )
 
             if self.error_handler:
                 self.error_handler.handle_download_error(
-                    last_error, download_item.url, show_user=True
+                    effective_error, download_item.url, show_user=True
                 )
 
         try:
@@ -298,6 +443,7 @@ class DownloadManager:
             del self.active_downloads[download_item.id]
 
         self.save_queue()
+        flush_logs()
         self._notify_progress_change(download_item.id)
         self._process_queue()
 
@@ -323,16 +469,23 @@ class DownloadManager:
                 download_item.downloaded_bytes = int(total_bytes * percent / 100)
 
             if "error" in progress:
+                diag = analyze_error(progress["error"])
                 download_item.status = DownloadStatus.FAILED
                 download_item.stage = "failed"
-                download_item.error_message = translate_error(Exception(progress["error"]))
+                download_item.error_code = diag.code
+                download_item.error_title = diag.title
+                download_item.error_message = diag.full_message()
 
             self._notify_progress_change(download_id)
         except Exception as e:
             self.logger.error("更新下載進度發生錯誤: %s", e)
 
     def _prepare_ydl_options(
-        self, download_item: DownloadItem, browser: str = None, use_cookies: bool = False
+        self,
+        download_item: DownloadItem,
+        browser: str = None,
+        use_cookies: bool = False,
+        cookie_opts: Optional[Dict] = None,
     ):
         """Always prepare pure high-quality MP3 extraction arguments."""
         output_path = Path(download_item.output_path)
@@ -356,11 +509,13 @@ class DownloadManager:
         ]
 
         if use_cookies and browser:
-            cookie_opts = self.cookie_manager.get_cookie_options(
-                download_item.url, browser=browser
+            resolved_opts = (
+                cookie_opts
+                if cookie_opts is not None
+                else self.cookie_manager.get_cookie_options(download_item.url, browser=browser)
             )
-            if cookie_opts:
-                extra_args.extend(cookie_opts_to_cli(cookie_opts))
+            if resolved_opts:
+                extra_args.extend(cookie_opts_to_cli(resolved_opts))
         else:
             self.cookie_manager.add_cookie_file_args(extra_args)
 

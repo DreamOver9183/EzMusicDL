@@ -74,7 +74,32 @@ class CookieManager:
         """Append --cookies argument if a cookies.txt file exists"""
         cookie_files = self._get_cookie_file_paths()
         if cookie_files:
-            args.extend(['--cookies', str(cookie_files[0])])
+            chosen = cookie_files[0]
+            self.logger.info("偵測到本機 cookies.txt，將納入請求: %s", chosen)
+            args.extend(['--cookies', str(chosen)])
+        else:
+            self.logger.debug("未找到 cookies.txt，使用匿名連線")
+
+    def get_diagnostic_summary(self) -> Dict[str, Any]:
+        """Return non-sensitive cookie environment summary for startup logs and diagnostics."""
+        network_settings = self.settings_manager.get_network_settings()
+        cookie_files = []
+        for path in self._get_cookie_file_paths():
+            try:
+                size = path.stat().st_size
+            except Exception:
+                size = -1
+            cookie_files.append({"path": str(path), "size": size})
+
+        browsers = {
+            browser: self._is_browser_available(browser)
+            for browser in ("firefox", "edge", "chrome")
+        }
+        return {
+            "cookies_enabled": bool(network_settings.get("cookies_enabled", True)),
+            "cookies_files": cookie_files,
+            "browsers": browsers,
+        }
 
     def get_cookie_options(self, url: str = None, browser: str = None) -> Dict[str, Any]:
         """
@@ -89,14 +114,14 @@ class CookieManager:
         # If specific browser requested, try only that one
         if browser:
             if self._is_browser_available(browser):
-                self.logger.info(f"Using cookies from {browser}")
+                self.logger.info("嘗試讀取 %s 瀏覽器 Cookie", browser)
                 cookie_options = {
                     'cookiesfrombrowser': (browser, None, None, None)
                 }
                 if url:
                     cookie_options.update(self._get_site_specific_options(url))
                 return cookie_options
-            self.logger.warning(f"Requested browser '{browser}' not available")
+            self.logger.debug("略過未安裝或無資料夾的瀏覽器 '%s'", browser)
             return {}
 
         # Try to get cookies from preferred browser
