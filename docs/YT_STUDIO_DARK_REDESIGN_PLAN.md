@@ -29,7 +29,7 @@ Windows 免安裝 YouTube 音樂下載器（Python 3.12、CustomTkinter、PyInst
 1. **基準（在 `init` 之前確認）**：worktree 從 `origin/main` 建立，而目前 17 個修改檔不在上面。先經使用者**明確同意**（會推到公開 repo），開一個 `chore:` 基準 PR 由使用者合併。提交前看過完整 diff 並做機密掃描；不含 `.agents/`；`.interface-design/` 納入（F1 要改）；`docs/` 寫回本計畫（v1.3.0）後納入。使用者不同意或未合併前，不開任何里程碑。
 2. **`init`**：`doctor.py --init --flow pr`；profile（quick＝`python -I -m compileall -q src main.py build.py`；verify＝quick 加 `python -m pytest tests -q`，M1 合併前只有 quick）、知識庫、權限規則請使用者確認；profile 與知識庫進版控前先問。
 3. **`plan`**：以本計畫為來源寫 `docs/rgs/requirements.md`（R 編號與可驗證驗收條件）與 `docs/rgs/design.md`（已查證事實、決策、風險、里程碑、追溯矩陣、狀態總覽）。**G0：使用者另行核准這兩份後才能 `run`**；核准本計畫不等於通過 G0。
-4. **里程碑（一個里程碑一個 PR）**：
+4. **里程碑（一個里程碑一個 PR）**。下表是核准本計畫時的切分；之後的切分與編號以 `docs/rgs/design.md` 為準：
 
 | 里程碑 | 本計畫階段 | 分支 |
 | :-- | :-- | :-- |
