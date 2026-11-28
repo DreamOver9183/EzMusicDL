@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "language": {
+    "docs": "zh-TW",
+    "commits": "en",
+    "prompts": "zh-TW"
+  },
+  "knowledge_base": [
+    "CLAUDE.md"
+  ],
+  "base_branch": "main",
+  "commands": {
+    "quick": [
+      "python -I -m compileall -q src main.py build.py"
+    ],
+    "verify": [
+      "python -I -m compileall -q src main.py build.py",
+      "python -m pytest tests -q"
+    ]
+  },
+  "pr": {
+    "post_review_comment": false
+  },
+  "worktree_copy": [],
+  "secrets": {
+    "deny_read": [
+      "*.jks",
+      "*.key",
+      "*.keystore",
+      "*.pem",
+      "*_KEY_*",
+      ".env",
+      ".env.*",
+      "cookies.txt",
+      "*cookies*.txt",
+      "data/*",
+      "logs/*"
+    ],
+    "patterns": []
+  }
+}
