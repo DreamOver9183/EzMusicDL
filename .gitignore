@@ -138,7 +138,6 @@ dmypy.json
 
 # Downloaded files (for testing)
 test_*
-!tests/**/test_*.py
 debug_*
 *.mp4
 *.webm

@@ -40,15 +40,6 @@ python main.py
 
 打包成 exe：`pip install pyinstaller`，然後執行 `python build.py`。
 
-### 執行測試
-
-```bash
-pip install pytest
-python -m pytest tests -q
-```
-
-預設執行 100 個離線測試。需要外部工具或外網的測試標記為 `network`，以 `python -m pytest tests -q -m network` 另外執行。
-
 ## 使用方式
 
 1. 開啟程式，在「搜尋下載」頁輸入歌名，或貼上 YouTube 連結

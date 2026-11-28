@@ -22,7 +22,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pyinstaller>=5.0",
-    "pytest>=7.0",
 ]
 
 [project.scripts]
@@ -38,10 +37,4 @@ where = ["src"]
 [tool.setuptools.package-data]
 ytdlp_gui = ["assets/*"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-markers = [
-    "network: 需要真實外部工具或外網",
-]
-addopts = '-m "not network"'
+
