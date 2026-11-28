@@ -4,6 +4,7 @@ Process Tracker - Track, cancel, and terminate subprocess trees for yt-dlp, FFmp
 """
 
 import logging
+import os
 import platform
 import subprocess
 import threading
@@ -15,6 +16,14 @@ logger = logging.getLogger(__name__)
 class ProcessCancelled(Exception):
     """Raised when process spawn is cancelled or tracker is shutting down."""
     pass
+
+
+def _get_taskkill_path() -> str:
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    candidate = os.path.join(system_root, "System32", "taskkill.exe")
+    if os.path.exists(candidate):
+        return candidate
+    return "taskkill"
 
 
 def kill_process_tree(proc: subprocess.Popen) -> None:
@@ -30,8 +39,9 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
     if platform.system() == "Windows":
         try:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            taskkill_cmd = _get_taskkill_path()
             res = subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                [taskkill_cmd, "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
                 creationflags=flags,
                 timeout=5,

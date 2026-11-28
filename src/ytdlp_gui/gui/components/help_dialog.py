@@ -547,24 +547,43 @@ class HelpDialog(ctk.CTkToplevel):
             return
 
         self.app_update_msg_lbl.configure(
-            text="正在啟動背景更新程序，程式即將重新啟動...",
+            text="正在啟動背景更新程序...",
             text_color=COLORS["accent"],
         )
-        applied = self.update_checker.apply_update(prepared)
-        if not applied:
-            self._applying_app_update = False
-            self.check_app_update_btn.configure(state="normal")
-            self.apply_app_update_btn.configure(state="normal", text="下載並更新")
-            self.app_update_msg_lbl.configure(
-                text="無法啟動免安裝更新背景程序，請查看診斷紀錄。",
-                text_color=COLORS["danger"],
-            )
-            return
 
-        if self.on_app_exit_for_update:
-            self.after(250, self.on_app_exit_for_update)
-        else:
-            self.after(250, self.destroy)
+        def _apply_worker():
+            try:
+                applied = self.update_checker.apply_update(prepared)
+            except Exception as e:
+                self.logger.error("[UPDATE] 背景套用更新發生例外: %s", e, exc_info=True)
+                applied = False
+
+            def _on_apply_done():
+                if applied:
+                    if self.on_app_exit_for_update:
+                        self.on_app_exit_for_update()
+                    elif self.winfo_exists():
+                        self.destroy()
+                else:
+                    if self.winfo_exists():
+                        self._applying_app_update = False
+                        self.check_app_update_btn.configure(state="normal")
+                        self.apply_app_update_btn.configure(state="normal", text="下載並更新")
+                        self.app_update_msg_lbl.configure(
+                            text="無法啟動免安裝更新背景程序，請查看診斷紀錄。",
+                            text_color=COLORS["danger"],
+                        )
+
+            try:
+                self.master.after(0, _on_apply_done)
+            except Exception:
+                if self.winfo_exists():
+                    try:
+                        self.after(0, _on_apply_done)
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_apply_worker, daemon=True).start()
 
     # ---------------- Engine Repair ----------------
 

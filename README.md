@@ -47,7 +47,7 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-預設執行 125 個離線測試。需要外部工具或外網的測試標記為 `network`，以 `python -m pytest tests -q -m network` 另外執行。
+預設執行 155 個離線測試（含在暫存目錄實際執行更新用 PowerShell 腳本的情境，約需一分鐘）。需要外部工具或外網的測試標記為 `network`，以 `python -m pytest tests -q -m network` 另外執行。
 
 ## 使用方式
 

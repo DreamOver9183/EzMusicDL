@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 import zipfile
@@ -25,12 +26,21 @@ from packaging.version import InvalidVersion, Version
 import requests
 
 from ytdlp_gui import __version__
+from ytdlp_gui.core import process_tracker
 from ytdlp_gui.utils.logger import flush_logs
 from ytdlp_gui.utils.paths import get_app_root as _paths_get_app_root, get_logs_dir, is_dir_writable
 
 DEFAULT_GITHUB_REPO = "DreamOver9183/EzMusicDL"
 PRESERVED_NAMES = frozenset({"bin", "data", "logs", "cookies.txt", ".update_backup"})
 _SHA256_RE = re.compile(r"\b([a-fA-F0-9]{64})\b")
+
+
+def _get_powershell_path() -> str:
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    candidate = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if os.path.exists(candidate):
+        return candidate
+    return "powershell.exe"
 
 
 def _ps_quote(value: str) -> str:
@@ -41,9 +51,12 @@ def _ps_quote(value: str) -> str:
 class UpdateChecker:
     """Check GitHub Releases and apply portable application updates."""
 
+    HANDSHAKE_TIMEOUT_S: float = 10.0
+
     def __init__(self, settings_manager=None, repo: Optional[str] = None):
         self.logger = logging.getLogger(__name__)
         self._settings = settings_manager
+        self._apply_lock = threading.Lock()
         configured_repo = ""
         if settings_manager is not None:
             configured_repo = (settings_manager.get("update_repo", "") or "").strip()
@@ -532,30 +545,24 @@ class UpdateChecker:
         parent_pid: int,
         log_path: Path,
         relaunch: bool = True,
+        *,
+        parent_wait_seconds: int = 30,
+        popup_seconds: int = 15,
+        alive_seconds: int = 10,
+        relaunch_delays: Tuple[int, ...] = (2, 4, 6, 8),
+        fallback_log_path: Optional[Path] = None,
     ) -> str:
         """Build a rollback-safe PowerShell updater script for Windows portable folders."""
         preserved_literal = ", ".join(_ps_quote(name) for name in sorted(PRESERVED_NAMES))
-        relaunch_block = (
-            "    $targetExe = Join-Path $appRoot $exeName\n"
-            "    if (-not (Test-Path -LiteralPath $targetExe)) {\n"
-            "        throw \"Missing updated executable: $targetExe\"\n"
-            "    }\n"
-            "    Write-UpdaterLog \"Update succeeded; removing backup and staging directories.\"\n"
-            "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue\n"
-            "    Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue\n"
-            "    Write-UpdaterLog \"Relaunching: $targetExe\"\n"
-            "    Start-Process -FilePath $targetExe -WorkingDirectory $appRoot\n"
-            if relaunch
-            else "    $targetExe = Join-Path $appRoot $exeName\n"
-            "    if (-not (Test-Path -LiteralPath $targetExe)) {\n"
-            "        throw \"Missing updated executable: $targetExe\"\n"
-            "    }\n"
-            "    Write-UpdaterLog \"Update succeeded (relaunch skipped for test mode); removing backup and staging directories.\"\n"
-            "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue\n"
-            "    Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+        delays_literal = ", ".join(str(int(d)) for d in relaunch_delays)
+        fallback_log_expr = (
+            _ps_quote(str(fallback_log_path))
+            if fallback_log_path is not None
+            else "Join-Path ([System.IO.Path]::GetTempPath()) 'EasyMusicDL_updater.log'"
         )
+        relaunch_val = "$true" if relaunch else "$false"
 
-        return (
+        header = (
             "$ErrorActionPreference = 'Stop'\n"
             f"$parentPid = {int(parent_pid)}\n"
             f"$stagingDir = {_ps_quote(str(staging_dir))}\n"
@@ -564,22 +571,79 @@ class UpdateChecker:
             f"$exeName = {_ps_quote(str(exe_name))}\n"
             f"$assetType = {_ps_quote(str(asset_type))}\n"
             f"$logPath = {_ps_quote(str(log_path))}\n"
+            f"$fallbackLogPath = {fallback_log_expr}\n"
             f"$backupDir = Join-Path $appRoot '.update_backup'\n"
             f"$preserved = @({preserved_literal})\n"
-            "\n"
+            f"$parentWaitSeconds = {int(parent_wait_seconds)}\n"
+            f"$popupSeconds = {int(popup_seconds)}\n"
+            f"$aliveSeconds = {int(alive_seconds)}\n"
+            f"$relaunchDelays = @({delays_literal})\n"
+            f"$relaunch = {relaunch_val}\n"
+        )
+
+        body = (
             "function Write-UpdaterLog([string]$msg) {\n"
             "    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')\n"
-            "    $dir = Split-Path -Parent $logPath\n"
-            "    if ($dir -and -not (Test-Path -LiteralPath $dir)) {\n"
-            "        New-Item -ItemType Directory -Path $dir -Force | Out-Null\n"
+            "    $line = \"[$ts] $msg\"\n"
+            "    try {\n"
+            "        $dir = Split-Path -Parent $logPath\n"
+            "        if ($dir -and -not (Test-Path -LiteralPath $dir)) {\n"
+            "            New-Item -ItemType Directory -Path $dir -Force | Out-Null\n"
+            "        }\n"
+            "        Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8\n"
+            "    } catch {\n"
+            "        try {\n"
+            "            $fbDir = Split-Path -Parent $fallbackLogPath\n"
+            "            if ($fbDir -and -not (Test-Path -LiteralPath $fbDir)) {\n"
+            "                New-Item -ItemType Directory -Path $fbDir -Force | Out-Null\n"
+            "            }\n"
+            "            Add-Content -LiteralPath $fallbackLogPath -Value $line -Encoding UTF8\n"
+            "        } catch {\n"
+            "        }\n"
             "    }\n"
-            "    Add-Content -LiteralPath $logPath -Value \"[$ts] $msg\" -Encoding UTF8\n"
             "}\n"
             "\n"
-            "function Move-WithRetry([string]$src, [string]$dst) {\n"
+            "function Show-UpdaterPopup([string]$text, [string]$title, [int]$icon) {\n"
+            "    try {\n"
+            "        $ws = New-Object -ComObject WScript.Shell\n"
+            "        $ws.Popup($text, $popupSeconds, $title, $icon) | Out-Null\n"
+            "    } catch {\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "function Test-AppDirWritable([string]$dir) {\n"
+            "    $probePath = $null\n"
+            "    try {\n"
+            "        if (-not (Test-Path -LiteralPath $dir -PathType Container)) {\n"
+            "            return $false\n"
+            "        }\n"
+            "        $probeName = '.probe_' + [System.Guid]::NewGuid().ToString('N') + '.tmp'\n"
+            "        $probePath = Join-Path $dir $probeName\n"
+            "        [System.IO.File]::WriteAllText($probePath, 'probe')\n"
+            "        return $true\n"
+            "    } catch {\n"
+            "        return $false\n"
+            "    } finally {\n"
+            "        if ($probePath -and (Test-Path -LiteralPath $probePath)) {\n"
+            "            try {\n"
+            "                [System.IO.File]::Delete($probePath)\n"
+            "            } catch {\n"
+            "                try { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue } catch {}\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "function Move-ItemAtomic([string]$src, [string]$dst) {\n"
             "    for ($i = 1; $i -le 5; $i++) {\n"
             "        try {\n"
-            "            Move-Item -LiteralPath $src -Destination $dst -Force\n"
+            "            if ([System.IO.Directory]::Exists($src)) {\n"
+            "                [System.IO.Directory]::Move($src, $dst)\n"
+            "            } elseif ([System.IO.File]::Exists($src)) {\n"
+            "                [System.IO.File]::Move($src, $dst)\n"
+            "            } else {\n"
+            "                throw \"Source item not found: $src\"\n"
+            "            }\n"
             "            return\n"
             "        } catch {\n"
             "            if ($i -eq 5) { throw }\n"
@@ -588,27 +652,198 @@ class UpdateChecker:
             "    }\n"
             "}\n"
             "\n"
-            "Write-UpdaterLog \"=== Updater started (parentPid=$parentPid, assetType=$assetType, appRoot=$appRoot) ===\"\n"
+            "function Get-Sha256Hex([string]$path) {\n"
+            "    $sha256 = $null\n"
+            "    $stream = $null\n"
+            "    try {\n"
+            "        $sha256 = [System.Security.Cryptography.SHA256]::Create()\n"
+            "        $stream = [System.IO.File]::OpenRead($path)\n"
+            "        $hashBytes = $sha256.ComputeHash($stream)\n"
+            "        $sb = New-Object System.Text.StringBuilder\n"
+            "        foreach ($b in $hashBytes) {\n"
+            "            $null = $sb.Append($b.ToString('x2'))\n"
+            "        }\n"
+            "        return $sb.ToString()\n"
+            "    } finally {\n"
+            "        if ($stream) { $stream.Dispose() }\n"
+            "        if ($sha256) { $sha256.Dispose() }\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "function Copy-UpdateItem([string]$src, [string]$dst) {\n"
+            "    Copy-Item -LiteralPath $src -Destination $dst -Recurse -Force\n"
+            "}\n"
+            "\n"
+            "function Remove-ItemVerified([string]$path) {\n"
+            "    if (-not (Test-Path -LiteralPath $path)) {\n"
+            "        return\n"
+            "    }\n"
+            "    for ($i = 1; $i -le 5; $i++) {\n"
+            "        try {\n"
+            "            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n"
+            "        } catch {\n"
+            "        }\n"
+            "        if (-not (Test-Path -LiteralPath $path)) {\n"
+            "            return\n"
+            "        }\n"
+            "        Start-Sleep -Milliseconds 500\n"
+            "    }\n"
+            "    if (Test-Path -LiteralPath $path) {\n"
+            "        throw \"Failed to remove path: $path\"\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "function Invoke-LaunchProcess([string]$exe, [string]$workDir) {\n"
+            "    return (Start-Process -FilePath $exe -WorkingDirectory $workDir -PassThru)\n"
+            "}\n"
+            "\n"
+            "function Start-UpdatedApp([string]$targetExe, [string]$workDir) {\n"
+            "    $proc = $null\n"
+            "    $launched = $false\n"
+            "    for ($attempt = 1; $attempt -le 5; $attempt++) {\n"
+            "        try {\n"
+            "            Write-UpdaterLog \"Launching updated app (attempt ${attempt}): $targetExe\"\n"
+            "            $proc = Invoke-LaunchProcess -exe $targetExe -workDir $workDir\n"
+            "            if ($proc) {\n"
+            "                try { $null = $proc.Handle } catch {}\n"
+            "            }\n"
+            "            $launched = $true\n"
+            "            break\n"
+            "        } catch {\n"
+            "            $exMsg = $_.Exception.Message\n"
+            "            Write-UpdaterLog \"Launch failed on attempt ${attempt}: $exMsg\"\n"
+            "            if ($attempt -lt 5) {\n"
+            "                $delayIdx = $attempt - 1\n"
+            "                $delaySec = 2\n"
+            "                if ($delayIdx -lt $relaunchDelays.Length) {\n"
+            "                    $delaySec = $relaunchDelays[$delayIdx]\n"
+            "                }\n"
+            "                Write-UpdaterLog \"Waiting ${delaySec} seconds before retry...\"\n"
+            "                Start-Sleep -Seconds $delaySec\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    if ($launched -and $proc) {\n"
+            "        $aliveWaited = 0.0\n"
+            "        $step = 0.5\n"
+            "        $earlyExited = $false\n"
+            "        while ($aliveWaited -lt $aliveSeconds) {\n"
+            "            if ($proc.HasExited) {\n"
+            "                $earlyExited = $true\n"
+            "                break\n"
+            "            }\n"
+            "            Start-Sleep -Milliseconds 500\n"
+            "            $aliveWaited += $step\n"
+            "        }\n"
+            "        if (-not $earlyExited -and -not $proc.HasExited) {\n"
+            "            Write-UpdaterLog \"Updated app is alive after ${aliveSeconds} s (pid=$($proc.Id)). Update succeeded.\"\n"
+            "            try {\n"
+            "                Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "            } catch {\n"
+            "                Write-UpdaterLog \"Warning: Failed to remove backupDir: $_\"\n"
+            "            }\n"
+            "            try {\n"
+            "                Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "            } catch {\n"
+            "                Write-UpdaterLog \"Warning: Failed to remove stagingDir: $_\"\n"
+            "            }\n"
+            "            Write-UpdaterLog \"=== Updater finished successfully ===\"\n"
+            "            exit 0\n"
+            "        } else {\n"
+            "            $ec = try { $proc.ExitCode } catch { 'unknown' }\n"
+            "            Write-UpdaterLog \"Updated app exited prematurely (ExitCode=${ec}). Will not restart.\"\n"
+            "            $msg = \"EasyMusicDL 已更新完成，但自動啟動後提早結束（結束代碼：${ec}）。`n請手動開啟：${targetExe}`n`n備份檔案保留於：${backupDir}`n如需手動復原，請將備份目錄中的檔案複製回程式目錄。`n詳細紀錄：${logPath}\"\n"
+            "            Show-UpdaterPopup -text $msg -title \"應用程式更新完成（需手動啟動）\" -icon 48\n"
+            "            exit 2\n"
+            "        }\n"
+            "    } else {\n"
+            "        Write-UpdaterLog \"All 5 launch attempts failed. Update files preserved.\"\n"
+            "        $msg = \"EasyMusicDL 已更新完成，請手動開啟 ${exeName}。`n`n程式路徑：${targetExe}`n詳細紀錄：${logPath}\"\n"
+            "        Show-UpdaterPopup -text $msg -title \"應用程式更新完成（請手動開啟）\" -icon 48\n"
+            "        exit 2\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "# --- main ---\n"
+            "$startedMarker = Join-Path $stagingDir 'updater.started'\n"
+            "try {\n"
+            "    [System.IO.File]::WriteAllText($startedMarker, \"$PID\")\n"
+            "} catch {\n"
+            "    try { Set-Content -LiteralPath $startedMarker -Value \"$PID\" -Force } catch {}\n"
+            "}\n"
+            "\n"
+            "Write-UpdaterLog \"=== Updater started (parentPid=${parentPid}, assetType=${assetType}, appRoot=${appRoot}) ===\"\n"
+            "\n"
             "$waited = 0\n"
-            "while ($waited -lt 60) {\n"
+            "$maxWaitLoops = [int]($parentWaitSeconds * 2)\n"
+            "while ($waited -lt $maxWaitLoops) {\n"
             "    if (-not (Get-Process -Id $parentPid -ErrorAction SilentlyContinue)) { break }\n"
             "    Start-Sleep -Milliseconds 500\n"
             "    $waited++\n"
             "}\n"
             "if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {\n"
-            "    Write-UpdaterLog \"ERROR: Parent process $parentPid did not exit within 30s; aborting safely.\"\n"
+            "    Write-UpdaterLog \"ERROR: Parent process ${parentPid} did not exit within ${parentWaitSeconds} s; aborting safely.\"\n"
+            "    Show-UpdaterPopup -text \"更新程式逾時：主程式未在時限內結束。`n請關閉程式後重試。\" -title \"應用程式更新失敗\" -icon 16\n"
             "    exit 1\n"
             "}\n"
-            "Start-Sleep -Seconds 1\n"
+            "Start-Sleep -Milliseconds 500\n"
             "\n"
-            "$copiedItems = New-Object System.Collections.Generic.List[string]\n"
-            "$backedUpItems = New-Object System.Collections.Generic.List[string]\n"
+            "$backupExistsAndNotEmpty = $false\n"
+            "if (Test-Path -LiteralPath $backupDir) {\n"
+            "    try {\n"
+            "        $existingBackupItems = Get-ChildItem -LiteralPath $backupDir -Force -ErrorAction Stop\n"
+            "        if ($existingBackupItems -and $existingBackupItems.Count -gt 0) {\n"
+            "            $backupExistsAndNotEmpty = $true\n"
+            "        }\n"
+            "    } catch {\n"
+            "        $enumErr = $_.Exception.Message\n"
+            "        Write-UpdaterLog \"ERROR: Failed to enumerate existing backup directory: $enumErr\"\n"
+            "        $enumMsg = \"無法讀取現有備份資料夾內容，更新程序中止。`n安裝內容未被更動。`n備份目錄：${backupDir}`n詳細紀錄：${logPath}\"\n"
+            "        Show-UpdaterPopup -text $enumMsg -title \"應用程式更新中止\" -icon 16\n"
+            "        exit 1\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "$destExe = Join-Path $appRoot $exeName\n"
+            "$hasExe = Test-Path -LiteralPath $destExe\n"
+            "$backupInternal = Join-Path $backupDir '_internal'\n"
+            "$backupHasInternal = Test-Path -LiteralPath $backupInternal\n"
+            "$appInternal = Join-Path $appRoot '_internal'\n"
+            "$appHasInternal = Test-Path -LiteralPath $appInternal\n"
+            "\n"
+            "if ($backupExistsAndNotEmpty) {\n"
+            "    $needsManualRecovery = (-not $hasExe) -or ($backupHasInternal -and (-not $appHasInternal))\n"
+            "    if ($needsManualRecovery) {\n"
+            "        Write-UpdaterLog \"ERROR: Detected non-empty backup from a previous failed update and damaged installation. Preserving backup.\"\n"
+            "        $recMsg = \"偵測到上次更新中斷且程式安裝不完整。`n備份檔案保留於：${backupDir}`n請手動復原備份檔案至程式資料夾後再試。`n詳細紀錄：${logPath}\"\n"
+            "        Show-UpdaterPopup -text $recMsg -title \"應用程式更新中止\" -icon 16\n"
+            "        exit 1\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "if (-not (Test-AppDirWritable -dir $appRoot)) {\n"
+            "    Write-UpdaterLog \"ERROR: Application directory is not writable: $appRoot\"\n"
+            "    Show-UpdaterPopup -text \"程式資料夾沒有寫入權限（${appRoot}）。`n請確認檔案未被鎖定或移至可寫入目錄後重試。\" -title \"應用程式更新失敗\" -icon 16\n"
+            "    exit 1\n"
+            "}\n"
+            "\n"
             "try {\n"
             "    if (Test-Path -LiteralPath $backupDir) {\n"
-            "        Remove-Item -LiteralPath $backupDir -Recurse -Force\n"
+            "        Remove-ItemVerified -path $backupDir\n"
             "    }\n"
             "    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null\n"
+            "} catch {\n"
+            "    $prepErr = $_.Exception.Message\n"
+            "    Write-UpdaterLog \"ERROR: Failed to initialize clean backup directory: $prepErr\"\n"
+            "    $prepMsg = \"無法重設備份資料夾，更新未進行。`n安裝未被更動。`n備份目錄：${backupDir}`n詳細紀錄：${logPath}\"\n"
+            "    Show-UpdaterPopup -text $prepMsg -title \"應用程式更新中止\" -icon 16\n"
+            "    exit 1\n"
+            "}\n"
             "\n"
+            "$journal = New-Object System.Collections.Generic.List[psobject]\n"
+            "\n"
+            "try {\n"
             "    $items = Get-ChildItem -LiteralPath $payloadRoot -Force\n"
             "    foreach ($item in $items) {\n"
             "        if ($preserved -contains $item.Name) {\n"
@@ -616,42 +851,123 @@ class UpdateChecker:
             "            continue\n"
             "        }\n"
             "        $dest = Join-Path $appRoot $item.Name\n"
-            "        if (Test-Path -LiteralPath $dest) {\n"
-            "            $bak = Join-Path $backupDir $item.Name\n"
-            "            Write-UpdaterLog \"Backing up existing: $($item.Name)\"\n"
-            "            Move-WithRetry -src $dest -dst $bak\n"
-            "            $backedUpItems.Add($item.Name) | Out-Null\n"
+            "        $bak = Join-Path $backupDir $item.Name\n"
+            "        $hadOriginal = Test-Path -LiteralPath $dest\n"
+            "\n"
+            "        $record = [PSCustomObject]@{\n"
+            "            Name = $item.Name\n"
+            "            HadOriginal = [bool]$hadOriginal\n"
             "        }\n"
+            "        $journal.Add($record) | Out-Null\n"
+            "\n"
+            "        if ($hadOriginal) {\n"
+            "            Write-UpdaterLog \"Backing up existing: $($item.Name)\"\n"
+            "            Move-ItemAtomic -src $dest -dst $bak\n"
+            "        }\n"
+            "\n"
             "        Write-UpdaterLog \"Installing new: $($item.Name)\"\n"
-            "        Copy-Item -LiteralPath $item.FullName -Destination $dest -Recurse -Force\n"
-            "        $copiedItems.Add($item.Name) | Out-Null\n"
+            "        Copy-UpdateItem -src $item.FullName -dst $dest\n"
             "    }\n"
             "\n"
-            f"{relaunch_block}"
+            "    if (-not (Test-Path -LiteralPath $destExe)) {\n"
+            "        throw \"Verification failed: Destination executable missing (${destExe})\"\n"
+            "    }\n"
+            "    $payloadExe = Join-Path $payloadRoot $exeName\n"
+            "    if (-not (Test-Path -LiteralPath $payloadExe)) {\n"
+            "        throw \"Verification failed: Payload executable missing (${payloadExe})\"\n"
+            "    }\n"
+            "    $destHash = Get-Sha256Hex -path $destExe\n"
+            "    $payloadHash = Get-Sha256Hex -path $payloadExe\n"
+            "    if ($destHash -ne $payloadHash) {\n"
+            "        throw \"Verification failed: SHA-256 mismatch for ${exeName} (dest=${destHash}, payload=${payloadHash})\"\n"
+            "    }\n"
+            "\n"
+            "    $payloadInternal = Join-Path $payloadRoot '_internal'\n"
+            "    if (Test-Path -LiteralPath $payloadInternal) {\n"
+            "        $destInternal = Join-Path $appRoot '_internal'\n"
+            "        if (-not (Test-Path -LiteralPath $destInternal)) {\n"
+            "            throw \"Verification failed: Destination _internal directory missing (${destInternal})\"\n"
+            "        }\n"
+            "    }\n"
+            "    Write-UpdaterLog \"Verification passed: executable hash and internal directory verified.\"\n"
             "} catch {\n"
-            "    $errMsg = $_.Exception.Message\n"
-            "    Write-UpdaterLog \"ERROR: Update failed ($errMsg); rolling back.\"\n"
-            "    foreach ($name in $copiedItems) {\n"
-            "        $dest = Join-Path $appRoot $name\n"
-            "        if (Test-Path -LiteralPath $dest) {\n"
-            "            Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "    $rollbackError = $_.Exception.Message\n"
+            "    Write-UpdaterLog \"ERROR: Update failed (${rollbackError}); rolling back.\"\n"
+            "\n"
+            "    $rollbackFailedItems = New-Object System.Collections.Generic.List[string]\n"
+            "\n"
+            "    $count = $journal.Count\n"
+            "    for ($i = $count - 1; $i -ge 0; $i--) {\n"
+            "        $entry = $journal[$i]\n"
+            "        $entryName = $entry.Name\n"
+            "        $hadOriginal = $entry.HadOriginal\n"
+            "        $dest = Join-Path $appRoot $entryName\n"
+            "        $bak = Join-Path $backupDir $entryName\n"
+            "\n"
+            "        try {\n"
+            "            if ($hadOriginal) {\n"
+            "                if (Test-Path -LiteralPath $bak) {\n"
+            "                    Write-UpdaterLog \"Rolling back: Restoring ${entryName} from backup\"\n"
+            "                    if (Test-Path -LiteralPath $dest) {\n"
+            "                        Remove-ItemVerified -path $dest\n"
+            "                    }\n"
+            "                    Move-ItemAtomic -src $bak -dst $dest\n"
+            "                } else {\n"
+            "                    Write-UpdaterLog \"Skipping rollback for ${entryName}: Not present in backup (original untouched)\"\n"
+            "                }\n"
+            "            } else {\n"
+            "                if (Test-Path -LiteralPath $dest) {\n"
+            "                    Write-UpdaterLog \"Rolling back: Removing newly installed ${entryName}\"\n"
+            "                    Remove-ItemVerified -path $dest\n"
+            "                }\n"
+            "            }\n"
+            "        } catch {\n"
+            "            $itemErr = $_.Exception.Message\n"
+            "            Write-UpdaterLog \"ERROR: Rollback failed for item ${entryName}: $itemErr\"\n"
+            "            $rollbackFailedItems.Add($entryName) | Out-Null\n"
             "        }\n"
             "    }\n"
-            "    foreach ($name in $backedUpItems) {\n"
-            "        $bak = Join-Path $backupDir $name\n"
-            "        $dest = Join-Path $appRoot $name\n"
-            "        if (Test-Path -LiteralPath $bak) {\n"
-            "            Move-Item -LiteralPath $bak -Destination $dest -Force -ErrorAction SilentlyContinue\n"
-            "        }\n"
+            "\n"
+            "    $isOccupied = ($rollbackError -match 'used by another process|being used|access is denied|存取被拒|程式正在使用|檔案已開啟')\n"
+            "    $occupiedHint = if ($isOccupied) { \"`n請關閉所有程式視窗後重試。\" } else { \"\" }\n"
+            "\n"
+            "    if ($rollbackFailedItems.Count -gt 0) {\n"
+            "        $failedList = $rollbackFailedItems -join ', '\n"
+            "        Write-UpdaterLog \"ROLLBACK INCOMPLETE: Failed to restore items: ${failedList}. Preserving ${backupDir}\"\n"
+            "        $popupMsg = \"EasyMusicDL 更新失敗，且部分檔案自動還原未完成。${occupiedHint}`n失敗項目：${failedList}`n備份檔案保留於：${backupDir}`n如需手動復原，請將備份目錄中的檔案複製回程式目錄。`n詳細紀錄：${logPath}\"\n"
+            "        Show-UpdaterPopup -text $popupMsg -title \"應用程式更新失敗（還原未完成）\" -icon 16\n"
+            "    } else {\n"
+            "        Write-UpdaterLog \"Rollback completed.\"\n"
+            "        $popupMsg = \"EasyMusicDL 更新失敗，已自動還原為原本版本。${occupiedHint}`n詳細紀錄：${logPath}\"\n"
+            "        Show-UpdaterPopup -text $popupMsg -title \"應用程式更新失敗\" -icon 16\n"
             "    }\n"
-            "    Write-UpdaterLog \"Rollback completed.\"\n"
-            "    try {\n"
-            "        $ws = New-Object -ComObject WScript.Shell\n"
-            "        $ws.Popup(\"EasyMusicDL 更新失敗，已自動還原為原本版本。`n詳細紀錄：$logPath\", 0, \"應用程式更新失敗\", 16) | Out-Null\n"
-            "    } catch {}\n"
             "    exit 1\n"
             "}\n"
+            "\n"
+            "if (-not $relaunch) {\n"
+            "    Write-UpdaterLog \"Update succeeded (relaunch skipped); removing backup and staging directories.\"\n"
+            "    try {\n"
+            "        Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "    } catch {}\n"
+            "    try {\n"
+            "        Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "    } catch {}\n"
+            "    Write-UpdaterLog \"=== Updater finished successfully ===\"\n"
+            "    exit 0\n"
+            "}\n"
+            "\n"
+            "try {\n"
+            "    Start-UpdatedApp -targetExe $destExe -workDir $appRoot\n"
+            "} catch {\n"
+            "    $cErr = $_.Exception.Message\n"
+            "    Write-UpdaterLog \"Error during relaunch phase: ${cErr}. Preserving update.\"\n"
+            "    $msg = \"EasyMusicDL 已更新完成，請手動開啟 ${exeName}。`n`n程式路徑：${destExe}`n詳細紀錄：${logPath}\"\n"
+            "    Show-UpdaterPopup -text $msg -title \"應用程式更新完成（請手動開啟）\" -icon 48\n"
+            "    exit 2\n"
+            "}\n"
         )
+
+        return header + "\n" + body
 
     @staticmethod
     def _clean_env() -> dict:
@@ -672,51 +988,109 @@ class UpdateChecker:
             self.logger.warning("[UPDATE] 非免安裝執行檔（原始碼模式），略過檔案替換")
             return False
 
-        staging_dir = Path(prepared["staging_dir"])
-        payload_root = Path(prepared["payload_root"])
-        app_root = self.get_app_root()
-        exe_name = prepared.get("exe_name") or Path(sys.executable).name
-        asset_type = prepared.get("asset_type") or "portable_zip"
-        parent_pid = os.getpid()
-        log_path = get_logs_dir() / "updater.log"
+        if not self._apply_lock.acquire(blocking=False):
+            self.logger.warning("[UPDATE] 更新程序已在進行中或已完成，略過重複呼叫")
+            return False
 
-        ps_script = self.build_windows_updater_script(
-            staging_dir=staging_dir,
-            payload_root=payload_root,
-            app_root=app_root,
-            exe_name=exe_name,
-            asset_type=asset_type,
-            parent_pid=parent_pid,
-            log_path=log_path,
-            relaunch=True,
-        )
-        ps_file = staging_dir / "updater.ps1"
-        ps_file.write_text(ps_script, encoding="utf-8-sig")
+        success = False
+        proc: Optional[subprocess.Popen] = None
+        try:
+            try:
+                staging_dir = Path(prepared["staging_dir"])
+                payload_root = Path(prepared["payload_root"])
+                app_root = self.get_app_root()
+                exe_name = prepared.get("exe_name") or Path(sys.executable).name
+                asset_type = prepared.get("asset_type") or "portable_zip"
+                parent_pid = os.getpid()
+                log_path = get_logs_dir() / "updater.log"
 
-        creation_flags = (
-            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        )
-        proc = subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-File",
-                str(ps_file),
-            ],
-            env=self._clean_env(),
-            creationflags=creation_flags,
-        )
-        self.logger.info(
-            "[UPDATE] 已啟動更新背景行程 (updater_pid=%s, parent_pid=%s, script=%s)",
-            proc.pid,
-            parent_pid,
-            ps_file,
-        )
-        flush_logs()
-        return True
+                ps_script = self.build_windows_updater_script(
+                    staging_dir=staging_dir,
+                    payload_root=payload_root,
+                    app_root=app_root,
+                    exe_name=exe_name,
+                    asset_type=asset_type,
+                    parent_pid=parent_pid,
+                    log_path=log_path,
+                    relaunch=True,
+                )
+                ps_file = staging_dir / "updater.ps1"
+                ps_file.write_text(ps_script, encoding="utf-8-sig")
+
+                started_marker = staging_dir / "updater.started"
+                if started_marker.exists():
+                    try:
+                        started_marker.unlink()
+                    except OSError:
+                        pass
+
+                powershell_exe = _get_powershell_path()
+                creation_flags = (
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                )
+
+                proc = subprocess.Popen(
+                    [
+                        powershell_exe,
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-WindowStyle",
+                        "Hidden",
+                        "-File",
+                        str(ps_file),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    env=self._clean_env(),
+                    creationflags=creation_flags,
+                )
+
+                timeout = getattr(self, "HANDSHAKE_TIMEOUT_S", 10.0)
+                start_time = time.perf_counter()
+                handshake_ok = False
+
+                while time.perf_counter() - start_time < timeout:
+                    if started_marker.exists():
+                        handshake_ok = True
+                        break
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+
+                if not handshake_ok and started_marker.exists():
+                    handshake_ok = True
+
+                if handshake_ok:
+                    self.logger.info(
+                        "[UPDATE] 已啟動更新背景行程 (updater_pid=%s, parent_pid=%s, script=%s)",
+                        proc.pid,
+                        parent_pid,
+                        ps_file,
+                    )
+                    flush_logs()
+                    success = True
+                    return True
+                else:
+                    self.logger.error(
+                        "[UPDATE] 更新背景行程握手失敗 (pid=%s, poll=%s, timeout=%ss)",
+                        proc.pid,
+                        proc.poll(),
+                        timeout,
+                    )
+                    process_tracker.kill_process_tree(proc)
+                    return False
+            except Exception as e:
+                self.logger.error("[UPDATE] apply_update 發生例外: %s", e, exc_info=True)
+                if proc is not None:
+                    try:
+                        process_tracker.kill_process_tree(proc)
+                    except Exception:
+                        pass
+                return False
+        finally:
+            if not success:
+                self._apply_lock.release()
