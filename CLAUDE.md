@@ -40,7 +40,9 @@
 | 目的 | 指令 |
 | :-- | :-- |
 | 快速檢查 | `python -I -m compileall -q src main.py build.py` |
-| 完整驗證 | 快速檢查，加上 `python -m pytest tests -q`（需已有 `tests/`） |
+| 完整驗證 | 快速檢查，加上 `python -m pytest tests -q` |
+| `network` 測試 | `python -m pytest tests -q -m network`（需要真實工具或外網的測試才標 `network`；預設不執行） |
+| 安裝測試工具 | `pip install pytest`（列在 `pyproject.toml` 的 `dev` 相依） |
 | 從原始碼啟動 | `python main.py`（會連網檢查引擎，並在 repo 根目錄寫入 `data/`、`logs/`） |
 | 打包 | `python build.py --zip`，**只在 repo 以外的原始碼複本執行**（見踩坑紀錄） |
 
@@ -53,6 +55,8 @@
 - CI（`.github/workflows/build.yml`）只在推送 `v*` tag 時執行。`release.ps1` 會以當天日期建立 tag 並推送 `main`，未經使用者同意不得執行。
 - 刪除或修改公開 Release 須另外取得使用者同意。
 - 測試：pytest，放在 `tests/`；不得寫入 repo 內的 `data/`、`logs/`，離線測試不得連網或啟動真實下載。
+- `tests/conftest.py` 自動套用兩層保護：`app_root` 把程式目錄、下載夾與工作目錄導向暫存位置；離線防護封鎖 socket 與 `ytdlp_wrapper` 的網路呼叫（標 `network` 者除外）。離線防護不封鎖 `subprocess`。
+- 新增匯入 `get_default_downloads_dir` 的模組時，要在 `app_root` fixture 補上替換，否則測試會指向使用者真正的下載夾。
 
 ## 踩坑紀錄
 
@@ -69,6 +73,12 @@
 - 複製到一半失敗時回滾可能把備份搬進殘缺資料夾（靜態閱讀） → 項目在複製成功後才記錄 → 複製前先記錄，還原前先刪除目的地。
 - 修了更新器，用舊的打包檔測不出效果 → 更新腳本由執行中的舊版產生 → 驗收時要用修正後的程式重新打包「舊版」。
 - 產生的 `.ps1` 含中文路徑與文字 → Windows PowerShell 5.1 需要 BOM 才會以 UTF-8 讀取 → 維持以 `utf-8-sig` 寫檔。
+
+### 版控與測試
+
+- 新增的 `tests/test_*.py` 沒出現在 `git status`，提交時漏掉 → `.gitignore` 的 `test_*`（原意是忽略測試下載檔）一併忽略測試檔 → 已加 `!tests/**/test_*.py`；新增檔案後確認 git 看得到。
+- 用類別屬性保存原始函式後，`is` 比對失敗 → 透過實例讀取類別屬性會變成 bound method → 用 `types.SimpleNamespace` 保存。
+- 「日誌不含機密」的測試可能在程式沒讀到假資料時也通過 → 只做否定斷言 → 同時斷言假檔案確實被偵測到。
 
 ### 打包與設定
 
